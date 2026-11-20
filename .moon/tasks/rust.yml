@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/tasks.json
+$schema: 'https://moonrepo.dev/schemas/tasks.json'
+
+inheritedBy:
+  file: 'Cargo.toml'
+
+fileGroups:
+  sources:
+    - '**/*'
+    - '/Cargo.toml'
+    - '/Cargo.lock'
+    - '/rust-toolchain.toml'
+
+tasks:
+  format:
+    command: 'cargo fmt --check'
+    inputs:
+      - '@group(sources)'
+
+  lint:
+    command: 'cargo clippy --all-targets -- --deny warnings'
+    inputs:
+      - '@group(sources)'
+
+  test:
+    command: 'cargo test'
+    inputs:
+      - '@group(sources)'

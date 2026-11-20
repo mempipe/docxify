@@ -1,0 +1,22 @@
+{
+  "name": "@mempipe/docxify",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DOCX toolkit from Mempipe.",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mempipe/docxify.git",
+    "directory": "packages/docxify-js"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+[package]
+name = "docxify"
+description = "DOCX toolkit from Mempipe."
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+repository.workspace = true
+version.workspace = true

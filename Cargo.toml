@@ -1,0 +1,10 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license-file = "LICENSE.md"
+publish = false
+repository = "https://github.com/mempipe/docxify"
+version = "0.0.0"

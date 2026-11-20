@@ -1,0 +1,6 @@
+# Tool versions, managed by proto (https://moonrepo.dev/proto).
+# Run `proto use` to install them. The Rust version is in rust-toolchain.toml.
+
+moon = "2.6.5"
+node = "26.13.1"
+pnpm = "12.21.0"
