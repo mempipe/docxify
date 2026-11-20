@@ -2,12 +2,7 @@
 
 ## Development
 
-docxify is a monorepo of a Rust library and a TypeScript library. [proto](https://moonrepo.dev/proto) installs the tools, and [moon](https://moonrepo.dev/moon) runs the tasks.
-
-| Path | Library |
-| --- | --- |
-| `crates/docxify` | The Rust crate `docxify` |
-| `packages/docxify-js` | The TypeScript package `@mempipe/docxify` |
+docxify is a monorepo. Its first library is the Rust crate `docxify-engine`, in `crates/docxify-engine`. [proto](https://moonrepo.dev/proto) installs the tools, and [moon](https://moonrepo.dev/moon) runs the tasks.
 
 [Install proto](https://moonrepo.dev/docs/proto/install), then install the pinned tools:
 
@@ -15,7 +10,7 @@ docxify is a monorepo of a Rust library and a TypeScript library. [proto](https:
 proto use
 ```
 
-Check everything. This checks formatting, lints, type-checks, tests and builds both libraries:
+Check everything. This checks formatting, lints and tests every crate:
 
 ```bash
 moon check --all
@@ -24,10 +19,9 @@ moon check --all
 Run one task in one project:
 
 ```bash
-moon run docxify:test
-moon run docxify-js:build
+moon run docxify-engine:test
 ```
 
-The `format` tasks only check. To fix formatting, run `cargo fmt` in a crate or `pnpm exec oxfmt` in a package.
+The `format` task only checks. To fix formatting, run `cargo fmt`.
 
-Tool versions are in `.prototools` and `rust-toolchain.toml`. Tasks are in `.moon/tasks`.
+Tool versions are in `.prototools` and `rust-toolchain.toml`. Tasks are in `.moon/tasks`. A new crate under `crates/` gets the same tasks with no moon configuration of its own.

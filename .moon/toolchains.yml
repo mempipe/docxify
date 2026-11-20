@@ -3,17 +3,3 @@ $schema: 'https://moonrepo.dev/schemas/toolchains.json'
 
 # The version comes from rust-toolchain.toml, which rustup and proto read too.
 rust: {}
-
-javascript:
-  packageManager: 'pnpm'
-  # Keep dependency updates explicit. By default moon runs `pnpm dedupe`,
-  # which rewrites the lockfile, whenever it installs dependencies.
-  dedupeOnLockfileChange: false
-  # .prototools is the one place the pnpm version is written.
-  syncPackageManagerField: false
-
-node:
-  versionFromPrototools: true
-
-pnpm:
-  versionFromPrototools: true
