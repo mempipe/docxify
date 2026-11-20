@@ -4,9 +4,14 @@ $schema: 'https://moonrepo.dev/schemas/tasks.json'
 inheritedBy:
   file: 'Cargo.toml'
 
+# moon replays a cached result unless an input changed, so a task's inputs must
+# name everything its result depends on. A crate can depend on any other crate
+# by path, and tests read the shared fixtures in /fixtures, so both are inputs
+# to every crate's tasks.
 fileGroups:
   sources:
-    - '**/*'
+    - '/crates/**/*'
+    - '/fixtures/**/*'
     - '/Cargo.toml'
     - '/Cargo.lock'
     - '/rust-toolchain.toml'

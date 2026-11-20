@@ -25,3 +25,5 @@ moon run docxify-engine:test
 The `format` task only checks. To fix formatting, run `cargo fmt`.
 
 Tool versions are in `.prototools` and `rust-toolchain.toml`. Tasks are in `.moon/tasks`. A new crate under `crates/` gets the same tasks with no moon configuration of its own.
+
+Shared test fixtures go in `fixtures/` at the root. moon replays a cached result unless an input changed, and every crate's tasks take all of `crates/` and `fixtures/` as inputs. Test data kept anywhere else must be added to the inputs in `.moon/tasks/rust.yml`.
