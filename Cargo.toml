@@ -1,0 +1,12 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+# The engine crates are written for edition 2021. Edition 2024 changes their
+# formatting and rejects one pattern, so moving to it is a change of its own.
+edition = "2021"
+license-file = "LICENSE.md"
+publish = false
+repository = "https://github.com/mempipe/docxify"
+version = "0.0.0"

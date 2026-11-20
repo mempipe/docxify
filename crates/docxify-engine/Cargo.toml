@@ -1,0 +1,8 @@
+[package]
+name = "docxify-engine"
+description = "DOCX engine from Mempipe."
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+repository.workspace = true
+version.workspace = true

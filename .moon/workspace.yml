@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/workspace.json
+$schema: 'https://moonrepo.dev/schemas/workspace.json'
+
+# A project's ID is its directory name.
+projects:
+  - 'crates/*'
+
+vcs:
+  defaultBranch: 'main'
+  provider: 'github'
