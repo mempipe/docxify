@@ -52,11 +52,11 @@ Proposed: awaiting operator approval.
 
 Proposed: awaiting operator approval.
 
-The source is the prototype at revision `f64cc0e115fb79b3cfaf4850b7572ea457369b34`.
+The source is the prototype at revision `2210c69073059d82b4bba72b1349fbbed49169ca`.
 
 | Here | Git tree hash |
 | --- | --- |
-| `crates/docx-engine` | `0ac557171c0730d9ab6ea04dbccf1a62b6e8b59d` |
+| `crates/docx-engine` | `45268e3cc24e12b8aacebaf87fb431e119f69177` |
 | `fixtures` | `4c4153813adfc342f367567b53026d6431cb3d1d` |
 
 A git tree hash covers the bytes, name and mode of every file below a directory. The prototype's two directories have these hashes at that revision. To check this repository's side:
@@ -83,7 +83,7 @@ Proposed: awaiting operator approval.
 
 Proposed: awaiting operator approval.
 
-- **`test` runs `cargo test --release`.** At the D4 revision the crate's 258 tests ran in 3.9 s in release and 41 s in debug, with the binaries already built. Each was timed once on a machine doing other work, so the ratio is the finding. Release is also the profile the prototype's own check uses.
+- **`test` runs `cargo test --release`.** At the D4 revision the crate's 258 tests ran in 4.3 s in release and 48 s in debug, with the binaries already built. Each was timed once on a machine doing other work, so the ratio is the finding. Release is also the profile the prototype's own check uses.
 - **`lint` runs Clippy with `--all-features`.** The crate has an optional `schema` feature and an example that requires it. Without the flag neither is compiled by any task.
 
 The cost of release is that debug assertions and overflow checks are off while the tests run.

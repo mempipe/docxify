@@ -19,7 +19,6 @@ use crate::edit::{check_text, Point, Track};
 
 use crate::error::{EditError, ExportError, OpenError};
 use crate::export::{prefix, Additions, DECLARATION};
-use crate::ids;
 use crate::import::{IN_COMMENT, NO_COMMAND};
 use crate::ir::{Made, NodeId, NodeKind, ParagraphInfo, StoryKind, Support};
 use crate::structure::{refuse, Loc};
@@ -205,33 +204,6 @@ impl Document {
 
     pub(crate) fn find_comment(&self, comment: &str) -> Option<NodeId> {
         self.comments().find(|&c| self.comment_id(c) == comment)
-    }
-
-    /// `wanted` if Word reads it and no comment or comment marker has it,
-    /// else a free ID.
-    pub(crate) fn free_comment_id(&self, wanted: Option<u32>) -> Result<u32, EditError> {
-        let mut taken = self.source_ids.comments.clone();
-        for node in &self.nodes {
-            if node.made.is_none() || self.attached(node.id).is_err() {
-                continue;
-            }
-            let id = match &node.kind {
-                NodeKind::Comment { comment_id, .. } => comment_id.as_str(),
-                _ => match self.comment_mark(node.id) {
-                    Some((_, id)) => id,
-                    None => continue,
-                },
-            };
-            taken.extend(id.trim().parse::<u32>().ok());
-        }
-        let accepted = 0..=ids::HIGHEST_NUMBER;
-        if let Some(id) = wanted.filter(|id| accepted.contains(id) && !taken.contains(id)) {
-            return Ok(id);
-        }
-        ids::next_free(&taken, accepted).ok_or(EditError::Comment {
-            comment: ids::HIGHEST_NUMBER.to_string(),
-            reason: "has no comment ID left to take",
-        })
     }
 
     /// The IDs of the comments commands made, which export keeps revisions off.

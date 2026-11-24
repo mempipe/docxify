@@ -3,6 +3,7 @@
 //! retains its parent even if that parent's author undoes the original add.
 use super::*;
 use crate::flow::Slot;
+use crate::ids;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Value {
     text: String,
@@ -255,9 +256,21 @@ impl Comments {
         });
         let mut numbers: HashMap<String, u32> = HashMap::new();
         let mut names = HashMap::new();
+        let mut taken = document.source_ids.comments.clone();
         for id in &order {
             let v = &all[id];
-            let number = document.free_comment_id(v.wanted).map_err(unbuilt)?;
+            let accepted = 0..=ids::HIGHEST_NUMBER;
+            let number = v
+                .wanted
+                .filter(|n| accepted.contains(n) && !taken.contains(n))
+                .or_else(|| ids::next_free(&taken, accepted))
+                .ok_or_else(|| {
+                    unbuilt(crate::EditError::Comment {
+                        comment: ids::HIGHEST_NUMBER.to_string(),
+                        reason: "has no comment ID left to take",
+                    })
+                })?;
+            taken.insert(number);
             let parent = match &v.parent {
                 None => None,
                 Some(Parent::Source(id)) => Some(id.clone()),
