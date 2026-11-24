@@ -70,6 +70,10 @@ pub struct NodeView<'a> {
     pub offset: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heading_level: Option<u8>,
+    /// The paragraph style in effect: the one the paragraph names when the
+    /// document defines it as a paragraph style, else the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_style: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list: Option<ListView<'a>>,
     /// The instruction of the innermost field whose result a text node is.
@@ -123,6 +127,9 @@ pub enum Resolved {
 pub struct CellPlacement {
     pub column: usize,
     pub rows: usize,
+    /// Cell (or preserving wrapper) at the bottom of this placement.
+    #[serde(skip)]
+    terminal: NodeId,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -225,7 +232,7 @@ impl EffectiveParagraph {
             contextual_spacing: props.contextual_spacing.unwrap_or(false),
             keep_next: props.keep_next.unwrap_or(false),
             keep_lines: props.keep_lines.unwrap_or(false),
-            widow_control: props.widow_control.unwrap_or(false),
+            widow_control: props.widow_control.unwrap_or(true),
             page_break_before: props.page_break_before.unwrap_or(false),
             tabs,
         }
@@ -287,7 +294,15 @@ impl Document {
             commands: &crate::COMMANDS,
             stories: self
                 .present_stories()
-                .map(|s| self.view(s.root, None, &mut Vec::new(), &mut BTreeMap::new()))
+                .map(|s| {
+                    self.view(
+                        s.root,
+                        None,
+                        &mut Vec::new(),
+                        &mut BTreeMap::new(),
+                        &BTreeMap::new(),
+                    )
+                })
                 .collect(),
             comments_story: self.comments_story().map(|s| self.stories[s].root),
             settings: &self.settings,
@@ -307,52 +322,66 @@ impl Document {
     /// One node's view, such as a story's after an edit, if it is in the document.
     pub fn inspect_node(&self, id: NodeId) -> Option<NodeView<'_>> {
         self.attached(id).ok()?;
+        self.sibling_views(id, &[]).next()
+    }
+
+    /// Consecutive children of an attached node, as they appear in the full inspection.
+    pub fn inspect_children(
+        &self,
+        parent: NodeId,
+        range: std::ops::Range<usize>,
+    ) -> Option<Vec<NodeView<'_>>> {
+        let children = self.attached(parent).ok()?.children.get(range)?;
+        Some(match children.split_first() {
+            Some((&first, rest)) => self.sibling_views(first, rest).collect(),
+            None => Vec::new(),
+        })
+    }
+
+    fn sibling_views<'d>(
+        &'d self,
+        first: NodeId,
+        rest: &'d [NodeId],
+    ) -> impl Iterator<Item = NodeView<'d>> + 'd {
+        let siblings = std::iter::once(first).chain(rest.iter().copied());
         let mut counts = BTreeMap::new();
-        let story = self.stories[self.n(id).story as usize].root;
-        if id != story
-            && std::iter::once(id)
-                .chain(self.descendants(id))
-                .any(|n| self.list_ref(n).is_some())
-        {
-            for prior in self.descendants(story).into_iter().take_while(|&n| n != id) {
-                if let Some(num) = self.list_ref(prior) {
-                    self.list_marker(num, &mut counts);
+        let mut open = Vec::new();
+        let story = &self.stories[self.n(first).story as usize];
+        if first != story.root {
+            let numbered = siblings.clone().any(|id| {
+                std::iter::once(id)
+                    .chain(self.descendant_ids(id))
+                    .any(|n| self.list_ref(n).is_some())
+            });
+            if numbered || story.comments {
+                for prior in self.descendant_ids(story.root).take_while(|&n| n != first) {
+                    if story.comments {
+                        self.pass_comment_mark(prior, &mut open);
+                    }
+                    if numbered {
+                        if let Some(num) = self.list_ref(prior) {
+                            self.advance_list(num, &mut counts);
+                        }
+                    }
                 }
             }
         }
-        Some(self.view(id, None, &mut self.comments_open(id), &mut counts))
+        // Rows and cells need their enclosing table's geometry. Inline nodes
+        // need offsets from their enclosing paragraph. Siblings share both.
+        let parent = self.n(first).parent;
+        let cells = parent
+            .filter(|&p| matches!(self.n(p).kind, NodeKind::Table(_) | NodeKind::Row(_)))
+            .and_then(|p| self.ancestor(p, |kind| matches!(kind, NodeKind::Table(_))))
+            .map(|table| self.cell_placements(table))
+            .unwrap_or_default();
+        let offsets = parent
+            .and_then(|p| self.paragraph_of(p))
+            .map(|paragraph| self.paragraph_text_and_offsets(paragraph).1);
+        siblings.map(move |id| self.view(id, offsets.as_ref(), &mut open, &mut counts, &cells))
     }
 
     pub fn inspect_json(&self) -> serde_json::Value {
         serde_json::to_value(self.inspect()).expect("inspection serializes")
-    }
-
-    /// The comments whose ranges are open where a node starts. A story
-    /// without comment markers has none open anywhere, so the walk is
-    /// skipped.
-    fn comments_open(&self, id: NodeId) -> Vec<&str> {
-        let mut open = Vec::new();
-        if !self.stories[self.nodes[id.index()].story as usize].comments {
-            return open;
-        }
-        let mut chain = vec![id];
-        while let Some(parent) = self.nodes[chain[chain.len() - 1].index()].parent {
-            chain.push(parent);
-        }
-        for pair in chain.windows(2).rev() {
-            let (child, parent) = (pair[0], pair[1]);
-            for &before in self.nodes[parent.index()]
-                .children
-                .iter()
-                .take_while(|&&c| c != child)
-            {
-                self.pass_comment_mark(before, &mut open);
-                for inside in self.descendants(before) {
-                    self.pass_comment_mark(inside, &mut open);
-                }
-            }
-        }
-        open
     }
 
     /// Opens or closes a comment's range at its marker.
@@ -379,7 +408,9 @@ impl Document {
                     }
                     Some("continue") => {
                         if let Some(&head) = above.get(&coverage) {
-                            cells.get_mut(&head).expect("visible merge start").rows += 1;
+                            let placement = cells.get_mut(&head).expect("visible merge start");
+                            placement.rows += 1;
+                            placement.terminal = cell.owner;
                             ongoing.insert(coverage, head);
                             rows = 0;
                         }
@@ -392,6 +423,7 @@ impl Document {
                         CellPlacement {
                             column: cell.start,
                             rows,
+                            terminal: cell.owner,
                         },
                     );
                 }
@@ -401,11 +433,13 @@ impl Document {
         cells
     }
 
-    fn list_marker(&self, num: &crate::NumRef, counts: &mut BTreeMap<String, Vec<u32>>) -> String {
-        let Some(level) = self.numbering.level(num) else {
-            return "•".into();
-        };
-        let counters = counts.entry(num.num_id.clone()).or_default();
+    fn advance_list<'counts, 'doc>(
+        &'doc self,
+        num: &'doc crate::NumRef,
+        counts: &'counts mut BTreeMap<&'doc str, Vec<u32>>,
+    ) -> Option<(&'doc Level, &'counts [u32])> {
+        let level = self.numbering.level(num)?;
+        let counters = counts.entry(&num.num_id).or_default();
         let i = usize::from(num.level);
         if let Some(n) = counters.get_mut(i) {
             *n = n.saturating_add(1);
@@ -422,6 +456,17 @@ impl Document {
                 counters.push(start);
             }
         }
+        Some((level, counters))
+    }
+
+    fn list_marker<'d>(
+        &'d self,
+        num: &'d crate::NumRef,
+        counts: &mut BTreeMap<&'d str, Vec<u32>>,
+    ) -> String {
+        let Some((level, counters)) = self.advance_list(num, counts) else {
+            return "•".into();
+        };
         if level.format == "bullet" {
             return if level.text.is_empty() {
                 "•".into()
@@ -459,7 +504,8 @@ impl Document {
         id: NodeId,
         offsets: Option<&BTreeMap<NodeId, usize>>,
         open: &mut Vec<&'d str>,
-        counts: &mut BTreeMap<String, Vec<u32>>,
+        counts: &mut BTreeMap<&'d str, Vec<u32>>,
+        cells: &BTreeMap<NodeId, CellPlacement>,
     ) -> NodeView<'d> {
         let node = &self.nodes[id.index()];
         self.pass_comment_mark(id, open);
@@ -471,6 +517,7 @@ impl Document {
             paragraph_text: None,
             offset: offsets.and_then(|o| o.get(&id).copied()),
             heading_level: None,
+            effective_style: None,
             list: None,
             field: None,
             page_field: None,
@@ -485,6 +532,7 @@ impl Document {
                 view.paragraph_text = Some(text);
                 own_offsets = Some(map);
                 view.heading_level = self.heading_level(id);
+                view.effective_style = self.paragraph_style(id);
                 view.list = self.list_ref(id).map(|num| ListView {
                     marker: self.list_marker(num, counts),
                     num_id: &num.num_id,
@@ -522,14 +570,20 @@ impl Document {
                     },
                 });
             }
-            NodeKind::Cell(_) => view.resolved = Some(self.resolve_cell(id)),
+            NodeKind::Cell(_) => {
+                view.resolved = Some(self.resolve_cell(id, cells[&id].terminal));
+            }
             _ => {}
         }
         let offsets = own_offsets.as_ref().or(offsets);
+        let cells = match &view.resolved {
+            Some(Resolved::Table { cells, .. }) => cells,
+            _ => cells,
+        };
         view.children = node
             .children
             .iter()
-            .map(|&c| self.view(c, offsets, open, counts))
+            .map(|&c| self.view(c, offsets, open, counts, cells))
             .collect();
         view
     }
@@ -586,18 +640,21 @@ impl Document {
 
     /// Every node below `id`, in document order, excluding `id`.
     pub fn descendants(&self, id: NodeId) -> Vec<NodeId> {
-        let mut out = Vec::new();
-        let mut stack: Vec<NodeId> = self.nodes[id.index()]
-            .children
-            .iter()
-            .rev()
-            .copied()
-            .collect();
-        while let Some(next) = stack.pop() {
-            out.push(next);
-            stack.extend(self.nodes[next.index()].children.iter().rev());
-        }
-        out
+        self.descendant_ids(id).collect()
+    }
+
+    fn descendant_ids(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        let mut stack = vec![self.n(id).children.iter()];
+        std::iter::from_fn(move || loop {
+            if let Some(&next) = stack.last_mut()?.next() {
+                let children = &self.n(next).children;
+                if !children.is_empty() {
+                    stack.push(children.iter());
+                }
+                return Some(next);
+            }
+            stack.pop();
+        })
     }
 
     /// Every paragraph in every story, tables included, in document order.
@@ -671,6 +728,12 @@ impl Document {
             NodeKind::Paragraph(info) => info
                 .style
                 .as_deref()
+                .filter(|id| {
+                    self.styles
+                        .styles
+                        .get(*id)
+                        .is_some_and(|s| s.kind == "paragraph")
+                })
                 .or_else(|| self.styles.default_paragraph_style().map(|s| s.id.as_str())),
             _ => None,
         }
@@ -705,16 +768,11 @@ impl Document {
         let NodeKind::Paragraph(info) = &self.nodes[id.index()].kind else {
             return None;
         };
-        let chain = self
-            .paragraph_style(id)
-            .map(|s| self.styles.chain(s))
-            .unwrap_or_default();
-        let num = info.props.numbering.as_ref().or_else(|| {
-            chain
-                .iter()
-                .rev()
-                .find_map(|s| s.paragraph.numbering.as_ref())
-        })?;
+        let num = info
+            .props
+            .numbering
+            .as_ref()
+            .or_else(|| self.style_numbering(id))?;
         // numId 0 removes numbering a style would otherwise apply.
         (num.num_id != "0").then_some(num)
     }
@@ -841,32 +899,25 @@ impl Document {
     /// A cell's borders, fill, margins and alignment from its table's style,
     /// its table and itself. The table's inside borders apply to the edges
     /// it shares with other cells, and its outside borders to the rest.
-    fn resolve_cell(&self, cell: NodeId) -> Resolved {
+    fn resolve_cell(&self, cell: NodeId, terminal: NodeId) -> Resolved {
         let NodeKind::Cell(info) = &self.nodes[cell.index()].kind else {
             unreachable!("a cell");
         };
         let row = self.nodes[cell.index()].parent.expect("a cell is in a row");
         let table = self.nodes[row.index()].parent.expect("a row is in a table");
         let table_props = self.table_props(table);
-        let rows: Vec<NodeId> = self.nodes[table.index()]
-            .children
-            .iter()
-            .copied()
-            .filter(|&r| matches!(self.nodes[r.index()].kind, NodeKind::Row(_)))
-            .collect();
-        let at = rows.iter().position(|&r| r == row).unwrap_or(0);
         // The row's columns as every table reader counts them, so a cell
         // inside a content control takes its columns here too.
         let slots = self.row_geometry(row);
-        let (start, end) = (slots.iter().find(|slot| slot.owner == cell))
-            .map_or((0, 0), |slot| (slot.start, slot.start + slot.span));
+        let slot = slots.iter().find(|slot| slot.owner == cell);
+        let (start, end) = slot.map_or((0, 0), |slot| (slot.start, slot.start + slot.span));
         let mut columns = slots.last().map_or(0, |slot| slot.start + slot.span);
         if let NodeKind::Row(row_info) = &self.nodes[row.index()].kind {
             columns = columns.max(row_info.grid_before as usize) + row_info.grid_after as usize;
         }
         let table_borders = &table_props.borders;
         let mut borders = Edges {
-            top: if at == 0 {
+            top: if self.rows(table).next() == Some(row) {
                 table_borders.outer.top.clone()
             } else {
                 table_borders.inside_h.clone()
@@ -876,11 +927,7 @@ impl Document {
             } else {
                 table_borders.inside_v.clone()
             },
-            bottom: if at + 1 == rows.len() {
-                table_borders.outer.bottom.clone()
-            } else {
-                table_borders.inside_h.clone()
-            },
+            bottom: None,
             right: if end >= columns {
                 table_borders.outer.right.clone()
             } else {
@@ -888,6 +935,18 @@ impl Document {
             },
         };
         borders.overlay(&info.props.borders);
+        // A wrapped continuation supplies its row but has no modelled cell borders.
+        let bottom = match &self.n(terminal).kind {
+            NodeKind::Cell(end) => &end.props.borders.bottom,
+            _ => &info.props.borders.bottom,
+        };
+        borders.bottom = bottom.clone().or_else(|| {
+            if self.n(terminal).parent == self.rows(table).next_back() {
+                table_borders.outer.bottom.clone()
+            } else {
+                table_borders.inside_h.clone()
+            }
+        });
         for edge in [
             &mut borders.top,
             &mut borders.left,

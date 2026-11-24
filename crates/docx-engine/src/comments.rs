@@ -19,10 +19,11 @@ use crate::edit::{check_text, Point, Track};
 
 use crate::error::{EditError, ExportError, OpenError};
 use crate::export::{prefix, Additions, DECLARATION};
+use crate::ids;
 use crate::import::{IN_COMMENT, NO_COMMAND};
 use crate::ir::{Made, NodeId, NodeKind, ParagraphInfo, StoryKind, Support};
 use crate::structure::{refuse, Loc};
-use crate::xml::{self, escape_attr, XmlText, W, W14};
+use crate::xml::{self, escape_attr, XmlText, MC, W, W14, W15};
 use crate::{fnv1a, Document, Theme};
 
 pub(crate) const REL_COMMENTS_EXTENDED: &str =
@@ -31,8 +32,6 @@ pub(crate) const CT_COMMENTS: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml";
 pub(crate) const CT_COMMENTS_EXTENDED: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml";
-const W15: &str = "http://schemas.microsoft.com/office/word/2012/wordml";
-const MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 
 /// Which of a comment's markers a node is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,12 +207,12 @@ impl Document {
         self.comments().find(|&c| self.comment_id(c) == comment)
     }
 
-    /// `wanted` if no comment or comment marker has it, else one above
-    /// every ID they have.
+    /// `wanted` if Word reads it and no comment or comment marker has it,
+    /// else a free ID.
     pub(crate) fn free_comment_id(&self, wanted: Option<u32>) -> Result<u32, EditError> {
-        let mut taken = std::collections::BTreeSet::new();
+        let mut taken = self.source_ids.comments.clone();
         for node in &self.nodes {
-            if node.made.is_some() && self.attached(node.id).is_err() {
+            if node.made.is_none() || self.attached(node.id).is_err() {
                 continue;
             }
             let id = match &node.kind {
@@ -225,24 +224,21 @@ impl Document {
             };
             taken.extend(id.trim().parse::<u32>().ok());
         }
-        if let Some(id) = wanted.filter(|id| !taken.contains(id)) {
+        let accepted = 0..=ids::HIGHEST_NUMBER;
+        if let Some(id) = wanted.filter(|id| accepted.contains(id) && !taken.contains(id)) {
             return Ok(id);
         }
-        let next = taken.last().map_or(Some(0), |n| n.checked_add(1));
-        next.ok_or(EditError::Comment {
-            comment: u32::MAX.to_string(),
+        ids::next_free(&taken, accepted).ok_or(EditError::Comment {
+            comment: ids::HIGHEST_NUMBER.to_string(),
             reason: "has no comment ID left to take",
         })
     }
 
-    /// The highest ID a comment a command made has, which export numbers
-    /// revisions above.
-    pub(crate) fn made_comment_ids(&self) -> u32 {
+    /// The IDs of the comments commands made, which export keeps revisions off.
+    pub(crate) fn made_comment_ids(&self) -> impl Iterator<Item = u32> + '_ {
         self.comments()
             .filter(|&c| self.n(c).made.is_some())
             .filter_map(|c| self.comment_id(c).parse::<u32>().ok())
-            .max()
-            .unwrap_or(0)
     }
 
     /// Where a comment marker goes for a point: beside the runs it is at

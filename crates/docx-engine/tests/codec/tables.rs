@@ -112,6 +112,11 @@ fn a_row_inserted_below_copies_its_row_and_continues_a_merge_across_it() {
             (2, None, Some(3000))
         ]
     );
+    let xml = part(&doc.export().unwrap(), DOCUMENT);
+    assert!(
+        xml.contains(r#"<w:p><w:r><w:t>Spans two columns</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/><w:vMerge/></w:tcPr><w:p></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/><w:gridSpan w:val="2"/></w:tcPr><w:p></w:p></w:tc></w:tr><w:tr>"#),
+        "{xml}"
+    );
     let reopened = reopen("table", &doc);
     let (_, _, table) = cell_of(&reopened, "Ada");
     assert_eq!(
@@ -162,6 +167,11 @@ fn a_row_inserted_above_the_header_copies_it_without_the_header_flag() {
             (1, None, Some(3000)),
             (1, None, Some(3000))
         ]
+    );
+    let xml = part(&doc.export().unwrap(), DOCUMENT);
+    assert!(
+        xml.contains(r#"<w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p></w:p></w:tc>"#),
+        "{xml}"
     );
     let reopened = reopen("table", &doc);
     let (_, _, again) = cell_of(&reopened, "Name");
@@ -218,6 +228,10 @@ fn a_column_inserted_halves_the_column_it_copies() {
     let xml = part(&doc.export().unwrap(), DOCUMENT);
     assert!(
         xml.contains(r#"<w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>"#),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Ada</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr><w:p></w:p></w:tc>"#),
         "{xml}"
     );
     let reopened = reopen("table", &doc);
@@ -487,6 +501,14 @@ fn tracked_changes_stay_behind_a_copy_and_block_column_commands() {
     );
     let xml = part(&doc.export().unwrap(), DOCUMENT);
     assert_eq!(xml.matches("<w:tcPrChange").count(), 1, "{xml}");
+    assert!(
+        xml.contains(r#"<w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">Typed</w:t></w:r></w:p></w:tc><w:tc>"#),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(r#"</w:tr><w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p></w:p></w:tc></w:tr></w:tbl>"#),
+        "{xml}"
+    );
     let reopened = reopen(name, &doc);
     let (_, typed_row, typed_table) = cell_of(&reopened, "Typed");
     assert_eq!(
@@ -861,5 +883,108 @@ fn table_copies_preserve_source_names_and_widths_under_rebound_prefixes() {
             );
             assert_editor_undo("scoped table copy", &bytes, &mut doc);
         }
+    }
+}
+
+#[test]
+fn column_edits_recognize_revision_names_in_their_xml_namespace() {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for (in_grid, local) in [(true, "tblGridChange"), (false, "tcPrChange")] {
+        let change = format!(
+            r#"<q:{local} w:id="5" {TRACKED}><w:{}/></q:{local}>"#,
+            if in_grid { "tblGrid" } else { "tcPr" }
+        );
+        for (namespace, refused) in [(W, true), ("urn:extension", false)] {
+            let td = if in_grid {
+                cell("A")
+            } else {
+                cell("A").replace("</w:tcPr>", &format!("{change}</w:tcPr>"))
+            };
+            let rows = format!("<w:tr>{td}{}</w:tr>", cell("B"));
+            let xml = table(if in_grid { &change } else { "" }, &rows)
+                .replace("<w:tbl>", &format!(r#"<w:tbl xmlns:q="{namespace}">"#));
+            let mut doc = EditingDocument::open(&with_body(&xml)).unwrap();
+            let (_, _, table) = cell_of(&doc, "A");
+            let result = doc.run(Command::InsertColumn {
+                table,
+                index: 1,
+                like: 0,
+            });
+            if refused {
+                assert!(result.unwrap_err().to_string().contains("tracked change"));
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn an_edit_keeps_the_markup_beside_table_properties_that_follow_a_range_marker() {
+    let bytes = with_body(
+        r#"<w:tbl><w:bookmarkStart w:id="3" w:name="mark"/><!--before--><w:tblPr/><?keep between?><w:tblGrid><w:gridCol w:w="1200"/></w:tblGrid><!--after--><w:tr><w:tc><w:p><w:r><w:t>ABCDE</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:bookmarkEnd w:id="3"/></w:p>"#,
+    );
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let text = text_node(&doc, "ABCDE");
+    edit(
+        &mut doc,
+        Command::InsertText {
+            at: at(text, 2),
+            text: "x".into(),
+        },
+    );
+    let xml = part(&doc.export().unwrap(), DOCUMENT);
+    // The properties move before the marker with the markup that led to each.
+    let head = r#"<w:tbl><!--before--><w:tblPr/><?keep between?><w:tblGrid><w:gridCol w:w="1200"/></w:tblGrid><w:bookmarkStart w:id="3" w:name="mark"/><!--after--><w:tr>"#;
+    assert!(xml.contains(head), "{xml}");
+    reopen("late table properties", &doc);
+    assert_editor_undo("late table properties", &bytes, &mut doc);
+}
+
+#[test]
+fn cell_properties_are_found_as_the_xml_parser_reads_them() {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    // WordprocessingML's namespace, written with a character reference.
+    let escaped = r#"<q:tcPr xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006&#x2F;main"><q:tcW q:w="2000" q:type="dxa"/><e:kept xmlns:e="urn:extension"/></q:tcPr>"#;
+    // An extension whose text holds what looks like the start of a tag.
+    let cdata = r#"<w:tcPr><w:tcW w:w="2000" w:type="dxa"/><e:ext xmlns:e="urn:extension"><![CDATA[1 < 2]]></e:ext></w:tcPr>"#;
+    for (name, properties) in [("CDATA", cdata), ("escaped", escaped)] {
+        let extension =
+            &properties[properties.find("<e:").unwrap()..properties.rfind("</").unwrap()];
+        let first = cell("A").replace(
+            r#"<w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>"#,
+            properties,
+        );
+        assert!(first.contains(extension));
+        let rows = format!("<w:tr>{first}{}</w:tr>", cell("B"));
+        let bytes = with_body(&table("", &rows));
+        let mut doc = EditingDocument::open(&bytes).unwrap();
+        let (_, row, table) = cell_of(&doc, "A");
+        // The first cell takes the width of the column removed after it.
+        edit(&mut doc, Command::RemoveColumn { table, index: 1 });
+        let out = doc.export().unwrap();
+        let reopened = Document::open(&out).unwrap();
+        assert_eq!(cells(&doc, row), [(1, None, Some(4000))], "{name}: live");
+        let (_, row, _) = cell_of(&reopened, "A");
+        assert_eq!(
+            cells(&reopened, row),
+            [(1, None, Some(4000))],
+            "{name}: reopened"
+        );
+        let xml = part(&out, DOCUMENT);
+        let tree = roxmltree::Document::parse(&xml).unwrap();
+        let blocks: Vec<usize> = tree
+            .descendants()
+            .filter(|n| n.has_tag_name((W, "tc")))
+            .map(|n| n.children().filter(|c| c.has_tag_name((W, "tcPr"))).count())
+            .collect();
+        assert_eq!(blocks, [1], "{name}: {xml}");
+        let widths = tree
+            .descendants()
+            .filter(|n| n.has_tag_name((W, "tcW")))
+            .count();
+        assert_eq!(widths, 1, "{name}: {xml}");
+        assert_eq!(xml.matches(extension).count(), 1, "{name}: {xml}");
+        assert_editor_undo(name, &bytes, &mut doc);
     }
 }

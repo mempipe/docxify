@@ -26,8 +26,6 @@ pub(crate) struct Importer<'a> {
     fields: Vec<OpenField>,
     /// Open move ranges as (ID, name), innermost last; they can span paragraphs too.
     moves: Vec<(Option<String>, Option<String>)>,
-    /// Every `wp:docPr` ID in drawings and in preserved content.
-    pub drawing_ids: Vec<u32>,
 }
 
 /// A field being read: its begin character or simple field, its instruction
@@ -71,7 +69,6 @@ impl<'a> Importer<'a> {
             story,
             fields: Vec::new(),
             moves: Vec::new(),
-            drawing_ids: Vec::new(),
         }
     }
 
@@ -451,14 +448,16 @@ impl<'a> Importer<'a> {
         let id = self.push(Some(parent), NodeKind::Table(info), Self::content(ro), el);
         // The schema puts range markers before the properties. Properties
         // that follow a marker still belong to the table's head, so that they
-        // are written with the table and not with the child after them.
+        // are written with the table and not with the child after them. Each
+        // takes the markup between it and the element before it.
         let mut late = Vec::new();
+        let mut previous = el.range().start;
         for c in elements(el) {
             let before = self.nodes[id.index()].children.len();
             match (c.tag_name().namespace() == Some(W), c.tag_name().name()) {
                 (true, "tblPr" | "tblGrid") => {
                     if before > 0 {
-                        late.push(c.range());
+                        late.push(previous..c.range().end);
                     }
                 }
                 (true, "tr") => self.row(id, c, ro, columns),
@@ -473,6 +472,7 @@ impl<'a> Importer<'a> {
                 let child = &mut self.nodes[child.index()];
                 child.lead = child.lead.max(property.end);
             }
+            previous = c.range().end;
         }
         if let Some(first) = self.nodes[id.index()].children.first() {
             if !late.is_empty() {
@@ -569,12 +569,14 @@ impl<'a> Importer<'a> {
 
     fn content_control(&mut self, parent: NodeId, el: X, block: bool) {
         let props = child(el, W, "sdtPr");
-        let (control, placeholder) = crate::controls::control_of(props);
+        let (control, placeholder, data_bound, lock) = crate::controls::read_control(el);
+        let content = child(el, W, "sdtContent");
         let kind = NodeKind::ContentControl {
+            content_start: content.map(|el| el.range().start),
             tag: props.and_then(|p| w_val(p, "tag")).map(str::to_string),
             alias: props.and_then(|p| w_val(p, "alias")).map(str::to_string),
-            data_bound: props.is_some_and(|p| child(p, W, "dataBinding").is_some()),
-            lock: props.and_then(|p| w_val(p, "lock")).map(str::to_string),
+            data_bound,
+            lock,
             control,
             placeholder,
         };
@@ -584,7 +586,6 @@ impl<'a> Importer<'a> {
             Support::ReadOnly(IN_CONTENT_CONTROL),
             el,
         );
-        let content = child(el, W, "sdtContent");
         if let Some(content) = content {
             for c in elements(content) {
                 if block {
@@ -609,7 +610,6 @@ impl<'a> Importer<'a> {
                 info.height_emu = d.attribute("cy").and_then(|v| v.parse().ok());
             } else if is(d, WP, "docPr") {
                 let id = d.attribute("id").and_then(|v| v.parse().ok());
-                self.drawing_ids.extend(id);
                 // A text box's content can hold drawings of its own; the
                 // drawing's own `docPr` comes first.
                 if info.id.is_none() {
@@ -690,7 +690,15 @@ impl<'a> Importer<'a> {
                 .attribute((R, "id"))
                 .unwrap_or_default()
                 .to_string();
-            let part = self.rel(&relationship).and_then(|r| r.part.clone());
+            let part = self
+                .rel(&relationship)
+                .and_then(|r| r.part.as_deref())
+                .map(|target| {
+                    self.package
+                        .actual_name(target)
+                        .unwrap_or(target)
+                        .to_owned()
+                });
             list.push(StoryRef {
                 kind: w_attr(reference, "type").unwrap_or("default").to_string(),
                 relationship,
@@ -763,11 +771,6 @@ impl<'a> Importer<'a> {
     }
 
     fn opaque(&mut self, parent: NodeId, el: X) {
-        let ids = el
-            .descendants()
-            .filter(|d| is(*d, WP, "docPr"))
-            .filter_map(|d| d.attribute("id")?.parse::<u32>().ok());
-        self.drawing_ids.extend(ids);
         let kind = NodeKind::Opaque {
             element: xml::display_name(el),
             namespace: el.tag_name().namespace().map(str::to_string),
@@ -835,12 +838,16 @@ fn end_tag_start(el: X) -> usize {
     }
 }
 
-/// What, inside content the engine does not model, points at something
-/// elsewhere, so that removing the content would leave that dangling.
+/// What makes deleting this preserved subtree unsafe.
 fn holds(el: X) -> Option<&'static str> {
     el.descendants()
         .filter(|d| d.is_element() && d.tag_name().namespace() == Some(W))
         .find_map(|d| match d.tag_name().name() {
+            "sdt" => {
+                let (_, _, _, lock) = crate::controls::read_control(d);
+                crate::controls::deletion_locked(lock.as_deref())
+                    .then_some("a deletion-locked content control")
+            }
             "footnoteReference" | "endnoteReference" => Some("a footnote or endnote reference"),
             "commentRangeStart" | "commentRangeEnd" | "commentReference" => Some("a comment"),
             "bookmarkStart" | "bookmarkEnd" => Some("a bookmark"),
@@ -1115,7 +1122,10 @@ pub struct Styles {
 impl Styles {
     pub fn parse(part: &str, text: &str, theme: &Theme) -> Result<Self, crate::OpenError> {
         let doc = xml::parse(part, text)?;
-        let root = doc.root_element();
+        Ok(Self::from_root(part, doc.root_element(), theme))
+    }
+
+    pub(crate) fn from_root(part: &str, root: X, theme: &Theme) -> Self {
         let mut styles = Styles {
             part: Some(part.to_string()),
             ..Styles::default()
@@ -1156,7 +1166,7 @@ impl Styles {
                 },
             );
         }
-        Ok(styles)
+        styles
     }
 
     /// The style and its `basedOn` ancestors, root first. Cycles stop at the
@@ -1203,6 +1213,30 @@ pub struct Level {
     pub paragraph: ParaProps,
 }
 
+impl Level {
+    fn from_element(l: X, theme: &Theme) -> Self {
+        Self {
+            format: w_val(l, "numFmt").unwrap_or("decimal").to_string(),
+            text: w_val(l, "lvlText").unwrap_or_default().to_string(),
+            start: w_val(l, "start").and_then(|v| v.parse().ok()).unwrap_or(1),
+            suffix: match w_val(l, "suff") {
+                Some("space") => "space",
+                Some("nothing") => "nothing",
+                _ => "tab",
+            },
+            justification: match w_val(l, "lvlJc") {
+                Some("center") => "center",
+                Some("right" | "end") => "right",
+                _ => "left",
+            },
+            run: child(l, W, "rPr")
+                .map(|r| run_props(r, theme))
+                .filter(|r| !r.is_empty()),
+            paragraph: child(l, W, "pPr").map(para_props).unwrap_or_default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Numbering {
     pub part: Option<String>,
@@ -1210,77 +1244,81 @@ pub struct Numbering {
     pub instances: BTreeMap<String, String>,
     /// abstractNumId → level index → level definition.
     pub abstracts: BTreeMap<String, BTreeMap<u8, Level>>,
+    /// Effective definitions for instances with level overrides. Other instances share their abstract levels.
+    #[serde(skip)]
+    instance_levels: BTreeMap<String, BTreeMap<u8, Level>>,
     /// Every `w:num`'s numId, those naming no definition included, so a
     /// list a command adds takes a number no instance has.
     #[serde(skip)]
     pub num_ids: BTreeSet<String>,
-    /// The highest numeric `w:abstractNumId`.
-    #[serde(skip)]
-    pub highest_abstract_id: Option<u32>,
 }
 
 impl Numbering {
     pub fn parse(part: &str, text: &str, theme: &Theme) -> Result<Self, crate::OpenError> {
         let doc = xml::parse(part, text)?;
+        Ok(Self::from_root(part, doc.root_element(), theme))
+    }
+
+    pub(crate) fn from_root(part: &str, root: X, theme: &Theme) -> Self {
         let mut numbering = Numbering {
             part: Some(part.to_string()),
             ..Numbering::default()
         };
-        for el in elements(doc.root_element()) {
-            if is(el, W, "abstractNum") {
-                let Some(id) = w_attr(el, "abstractNumId") else {
+        for el in elements(root).filter(|el| is(*el, W, "abstractNum")) {
+            let Some(id) = w_attr(el, "abstractNumId") else {
+                continue;
+            };
+            let levels = elements(el)
+                .filter(|l| is(*l, W, "lvl"))
+                .filter_map(|l| {
+                    Some((
+                        w_attr(l, "ilvl")?.parse().ok()?,
+                        Level::from_element(l, theme),
+                    ))
+                })
+                .collect();
+            numbering.abstracts.insert(id.to_string(), levels);
+        }
+        for el in elements(root).filter(|el| is(*el, W, "num")) {
+            let Some(id) = w_attr(el, "numId") else {
+                continue;
+            };
+            numbering.num_ids.insert(id.to_string());
+            let Some(abs) = w_val(el, "abstractNumId") else {
+                continue;
+            };
+            numbering.instances.insert(id.to_string(), abs.to_string());
+            if child(el, W, "lvlOverride").is_none() {
+                continue;
+            }
+            let mut levels = numbering.abstracts.get(abs).cloned().unwrap_or_default();
+            for entry in elements(el).filter(|e| is(*e, W, "lvlOverride")) {
+                let Some(index) = w_attr(entry, "ilvl").and_then(|v| v.parse().ok()) else {
                     continue;
                 };
-                if let Ok(n) = id.parse::<u32>() {
-                    numbering.highest_abstract_id = numbering.highest_abstract_id.max(Some(n));
+                if let Some(level) = child(entry, W, "lvl") {
+                    levels.insert(index, Level::from_element(level, theme));
                 }
-                let levels = elements(el)
-                    .filter(|l| is(*l, W, "lvl"))
-                    .filter_map(|l| {
-                        let ilvl = w_attr(l, "ilvl")?.parse().ok()?;
-                        Some((
-                            ilvl,
-                            Level {
-                                format: w_val(l, "numFmt").unwrap_or("decimal").to_string(),
-                                text: w_val(l, "lvlText").unwrap_or_default().to_string(),
-                                start: w_val(l, "start").and_then(|v| v.parse().ok()).unwrap_or(1),
-                                suffix: match w_val(l, "suff") {
-                                    Some("space") => "space",
-                                    Some("nothing") => "nothing",
-                                    _ => "tab",
-                                },
-                                justification: match w_val(l, "lvlJc") {
-                                    Some("center") => "center",
-                                    Some("right" | "end") => "right",
-                                    _ => "left",
-                                },
-                                run: child(l, W, "rPr")
-                                    .map(|r| run_props(r, theme))
-                                    .filter(|r| !r.is_empty()),
-                                paragraph: child(l, W, "pPr").map(para_props).unwrap_or_default(),
-                            },
-                        ))
-                    })
-                    .collect();
-                numbering.abstracts.insert(id.to_string(), levels);
-            } else if is(el, W, "num") {
-                if let Some(num_id) = w_attr(el, "numId") {
-                    numbering.num_ids.insert(num_id.to_string());
-                }
-                if let (Some(num_id), Some(abs)) = (w_attr(el, "numId"), w_val(el, "abstractNumId"))
-                {
-                    numbering
-                        .instances
-                        .insert(num_id.to_string(), abs.to_string());
+                if let (Some(level), Some(start)) = (
+                    levels.get_mut(&index),
+                    w_val(entry, "startOverride").and_then(|v| v.parse().ok()),
+                ) {
+                    level.start = start;
                 }
             }
+            numbering.instance_levels.insert(id.to_string(), levels);
         }
-        Ok(numbering)
+        numbering
     }
 
     pub fn level(&self, num: &NumRef) -> Option<&Level> {
-        let abs = self.instances.get(&num.num_id)?;
-        self.abstracts.get(abs)?.get(&num.level)
+        self.levels(&num.num_id)?.get(&num.level)
+    }
+
+    pub(crate) fn levels(&self, num_id: &str) -> Option<&BTreeMap<u8, Level>> {
+        self.instance_levels
+            .get(num_id)
+            .or_else(|| self.abstracts.get(self.instances.get(num_id)?))
     }
 }
 

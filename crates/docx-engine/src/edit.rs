@@ -116,8 +116,8 @@ pub enum Command {
     /// Insert a picture in the line at a point: `media`, a part name
     /// [`Document::media_name`] returned or an image the package holds, at
     /// `width_emu` by `height_emu` EMUs, with `description` as its
-    /// alternative text. It takes drawing ID `id` when no other drawing has
-    /// it, else the next free one.
+    /// alternative text. It takes drawing ID `id` when Word loads it and no
+    /// other drawing has it, else a free one.
     InsertPicture {
         at: Point,
         /// When supplied, replace the range from `at` to this point as one edit.
@@ -234,8 +234,8 @@ pub enum Command {
     RemoveColumn { table: NodeId, index: usize },
     /// Comment on the content from `from` to `to`, in one story, with
     /// `text`, in which a line feed starts a new paragraph, by `by`. The
-    /// comment takes ID `id` when no comment has it, else one above every
-    /// comment's.
+    /// comment takes ID `id` when Word reads it and no comment has it, else
+    /// a free one.
     AddComment {
         from: Point,
         to: Point,

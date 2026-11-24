@@ -17,7 +17,7 @@ Verified on macOS, by the command named:
 | The moved directories are the source's | `git rev-parse HEAD:crates/docx-engine HEAD:fixtures` | Both hashes equal the prototype's at the D4 revision. The prototype's were read from its repository at that revision |
 | No file differs | `diff -r` between the prototype's two directories and this repository's | No output |
 | Dependency versions | A comparison of every package in `Cargo.lock` with the prototype's lockfile | 49 kept, none at a different version |
-| Format, lint and tests | `moon check --all` | All three tasks pass. 216 tests pass in release |
+| Format, lint and tests | `moon check --all` | All three tasks pass. 258 tests pass in release |
 | The tasks can fail | A temporary test file with a failing test, an unused variable and bad formatting | `test`, `lint` and `format` each failed. The file is not in the branch, and the crate's hash was checked again after it was removed |
 | The examples run | `cargo run -p docx-engine --example inspect` and `--example edit` on two fixtures | Printed the inspection, and wrote an edited DOCX |
 | A fresh clone works | `proto use`, then `moon check --all`, in a new clone of the branch | Pass, with a clean tree afterwards |

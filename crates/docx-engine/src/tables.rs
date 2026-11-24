@@ -6,10 +6,11 @@
 //! its width and every cell's `w:tcW` stays the sum of its columns.
 
 use crate::error::EditError;
-use crate::format::{rewrite, without};
+use crate::format::{rewrite, without, Unreadable};
 use crate::import::{cell_geometry, cell_width, grid_columns};
 use crate::ir::{CellInfo, Made, NodeId, NodeKind, ParagraphInfo, RowInfo, Support};
 use crate::structure::refuse;
+use crate::xml::w_local;
 use crate::Document;
 
 const TCPR_ORDER: [&str; 18] = [
@@ -207,19 +208,15 @@ impl Document {
         Ok(())
     }
 
-    fn compose_cell_properties(
-        &mut self,
-        id: NodeId,
-        properties: &str,
-    ) -> Result<String, EditError> {
+    fn compose_cell_properties(&mut self, id: NodeId, properties: &str) -> Result<(), EditError> {
         let parsed =
             self.read_markup(id, properties, |p| (cell_geometry(Some(p)), cell_width(p)))?;
         let (geometry, width) = parsed.unwrap_or_else(|| (cell_geometry(None), None));
-        let current = self.replace_properties(
+        self.replace_properties(
             id,
             "tcPr",
             properties,
-            |scope, e| scope.local(e).is_some_and(|n| CELL.contains(&n)),
+            |e| w_local(e).is_some_and(|n| CELL.contains(&n)),
             "only a cell's width, grid span and vertical merge can change this way",
         )?;
         if let NodeKind::Cell(info) = &mut self.nodes[id.index()].kind {
@@ -227,7 +224,7 @@ impl Document {
             info.vertical_merge = geometry.vertical_merge;
             info.width = width;
         }
-        Ok(current)
+        Ok(())
     }
 
     pub(crate) fn set_table_grid(&mut self, id: NodeId, grid: &str) -> Result<(), EditError> {
@@ -241,7 +238,7 @@ impl Document {
             id,
             "tblGrid",
             grid,
-            |scope, e| scope.is(e, "gridCol"),
+            |e| w_local(e) == Some("gridCol"),
             "only a table's grid columns can change this way",
         )?;
         if let NodeKind::Table(info) = &mut self.nodes[id.index()].kind {
@@ -277,7 +274,7 @@ impl Document {
         Ok(())
     }
 
-    pub(crate) fn rows(&self, table: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+    pub(crate) fn rows(&self, table: NodeId) -> impl DoubleEndedIterator<Item = NodeId> + '_ {
         self.n(table)
             .children
             .iter()
@@ -349,10 +346,10 @@ impl Document {
         if grid.is_empty() {
             return refuse(table, "the table has no grid");
         }
-        let name = self.w_name(table, "tblGrid");
-        let prefix = name.strip_suffix("tblGrid").unwrap_or_default();
-        let head = self.head(table);
-        if head.contains(&format!("<{prefix}tblGridChange")) {
+        let markup = self.properties(table, "tblGrid")?;
+        let unchanged =
+            without(&markup, &self.scope(table), &["tblGridChange"]).map_err(|e| e.on(table))?;
+        if unchanged != markup {
             return refuse(
                 table,
                 "the table grid has a tracked change; accept or reject it first",
@@ -381,11 +378,10 @@ impl Document {
             }
             for s in &slots {
                 self.check_editable(s.cell)?;
-                let tcpr = self.properties(s.cell, "tcPr");
-                if REVISIONS
-                    .iter()
-                    .any(|r| tcpr.contains(&format!("<{prefix}{r}")))
-                {
+                let tcpr = self.properties(s.cell, "tcPr")?;
+                let unchanged =
+                    without(&tcpr, &self.scope(s.cell), &REVISIONS).map_err(|e| e.on(s.cell))?;
+                if unchanged != tcpr {
                     return refuse(
                         s.cell,
                         "a cell has a tracked change; accept or reject it first",
@@ -405,20 +401,19 @@ impl Document {
         span: Option<usize>,
         width: Option<u32>,
         merge: Option<&str>,
-    ) -> String {
+    ) -> Result<String, EditError> {
         let name = self.w_name(cell, "tcPr");
         let prefix = name.strip_suffix("tcPr").unwrap_or_default().to_string();
         let val = self.w_attr_name(cell, "val");
         let scope = &self.scope(cell);
-        let mut tcpr = self.properties(cell, "tcPr");
+        let unreadable = |e: Unreadable| e.on(cell);
+        let mut tcpr = self.properties(cell, "tcPr")?;
         if let Some(width) = width {
-            let w = self.w_attr_name(cell, "w");
-            // An unprefixed cell declares w on the first attribute.
-            let attr_prefix = if prefix.is_empty() { "w:" } else { &prefix };
+            let (declaration, attr) = self.w_attr_prefix(cell);
             let set = vec![format!(
-                "<{prefix}tcW {w}=\"{width}\" {attr_prefix}type=\"dxa\"/>"
+                "<{prefix}tcW {declaration}{attr}:w=\"{width}\" {attr}:type=\"dxa\"/>"
             )];
-            tcpr = rewrite(&tcpr, scope, &name, &TCPR_ORDER, &["tcW"], set);
+            tcpr = rewrite(&tcpr, scope, &name, &TCPR_ORDER, &["tcW"], set).map_err(unreadable)?;
         }
         if let Some(span) = span {
             let set = (span > 1).then(|| vec![format!("<{prefix}gridSpan {val}=\"{span}\"/>")]);
@@ -429,7 +424,8 @@ impl Document {
                 &TCPR_ORDER,
                 &["gridSpan"],
                 set.unwrap_or_default(),
-            );
+            )
+            .map_err(unreadable)?;
         }
         if let Some(merge) = merge {
             let set = match merge {
@@ -437,13 +433,14 @@ impl Document {
                 "none" => Vec::new(),
                 _ => vec![format!("<{prefix}vMerge/>")],
             };
-            tcpr = rewrite(&tcpr, scope, &name, &TCPR_ORDER, &["vMerge"], set);
+            tcpr =
+                rewrite(&tcpr, scope, &name, &TCPR_ORDER, &["vMerge"], set).map_err(unreadable)?;
         }
-        tcpr
+        Ok(tcpr)
     }
 
     /// A table's `w:tblGrid` with these column widths.
-    fn grid_markup(&self, table: NodeId, widths: &[u32]) -> String {
+    fn grid_markup(&self, table: NodeId, widths: &[u32]) -> Result<String, EditError> {
         let name = self.w_name(table, "tblGrid");
         let prefix = name.strip_suffix("tblGrid").unwrap_or_default();
         let w = self.w_attr_name(table, "w");
@@ -451,7 +448,7 @@ impl Document {
             .iter()
             .map(|width| format!("<{prefix}gridCol {w}=\"{width}\"/>"))
             .collect();
-        let current = self.properties(table, "tblGrid");
+        let current = self.properties(table, "tblGrid")?;
         rewrite(
             &current,
             &self.scope(table),
@@ -460,28 +457,32 @@ impl Document {
             &["gridCol"],
             columns,
         )
+        .map_err(|e| e.on(table))
     }
 
-    pub(crate) fn empty_row_like(&mut self, like: NodeId, info: RowInfo) -> NodeId {
+    pub(crate) fn empty_row_like(
+        &mut self,
+        table: NodeId,
+        like: NodeId,
+        info: RowInfo,
+    ) -> Result<NodeId, EditError> {
         let story = self.n(like).story;
         let name = self.element_name(like);
         let tail = format!("</{name}>");
-        let exceptions = self.properties(like, "tblPrEx");
-        let trpr = self.properties(like, "trPr");
+        let exceptions = self.properties(like, "tblPrEx")?;
+        let trpr = self.properties(like, "trPr")?;
         let mut stripped = REVISIONS.to_vec();
         stripped.extend(["cnfStyle", "tblHeader"]);
         let scope = self.scope(like);
-        let trpr = without(&trpr, &scope, &stripped);
-        let head = format!(
-            "<{name}{}>{exceptions}{trpr}",
-            scope.detached_declarations()
-        );
+        let trpr = without(&trpr, &scope, &stripped).map_err(|e| e.on(like))?;
+        let open = scope.carried_to(&self.scope(table), &format!("<{name}>"));
+        let head = format!("{open}{exceptions}{trpr}");
         let info = RowInfo {
             revision: None,
             header: false,
             ..info
         };
-        self.create(
+        let row = self.create(
             NodeKind::Row(info),
             Support::Editable,
             Made {
@@ -490,64 +491,58 @@ impl Document {
                 like: None,
             },
             story,
-        )
+        );
+        self.attach(row, table, self.n(table).children.len());
+        Ok(row)
     }
 
-    /// A new, detached, empty copy of a row or cell, built without the
-    /// journal: only attaching it is a change an editor draws.
-    pub(crate) fn empty_copy(&mut self, like: NodeId) -> NodeId {
+    /// Build in the destination row so edits to the copy read its actual scope.
+    pub(crate) fn empty_cell_like(
+        &mut self,
+        row: NodeId,
+        like: NodeId,
+    ) -> Result<NodeId, EditError> {
         let story = self.n(like).story;
         let name = self.element_name(like);
         let tail = format!("</{name}>");
-        match self.n(like).kind.clone() {
-            NodeKind::Row(info) => {
-                let row = self.empty_row_like(like, info);
-                let cells: Vec<NodeId> = self.n(like).children.clone();
-                for cell in cells {
-                    if matches!(self.n(cell).kind, NodeKind::Cell(_)) {
-                        let copy = self.empty_copy(cell);
-                        self.adopt(row, copy);
-                    }
-                }
-                row
-            }
-            NodeKind::Cell(info) => {
-                let tcpr = self.properties(like, "tcPr");
-                let mut stripped = REVISIONS.to_vec();
-                stripped.extend(["cnfStyle", "vMerge"]);
-                let scope = self.scope(like);
-                let tcpr = without(&tcpr, &scope, &stripped);
-                let head = format!("<{name}{}>{tcpr}", scope.detached_declarations());
-                let info = CellInfo {
-                    vertical_merge: None,
-                    ..info
-                };
-                let cell = self.create(
-                    NodeKind::Cell(info),
-                    Support::Editable,
-                    Made {
-                        head,
-                        tail,
-                        like: None,
-                    },
-                    story,
-                );
-                let first = self
-                    .n(like)
-                    .children
-                    .iter()
-                    .copied()
-                    .find(|&c| matches!(self.n(c).kind, NodeKind::Paragraph(_)));
-                let paragraph = self.empty_paragraph(first, cell);
-                self.adopt(cell, paragraph);
-                cell
-            }
-            _ => unreachable!("copy_node copies rows and cells"),
-        }
+        let NodeKind::Cell(info) = self.n(like).kind.clone() else {
+            unreachable!("a cell template")
+        };
+        let tcpr = self.properties(like, "tcPr")?;
+        let mut stripped = REVISIONS.to_vec();
+        stripped.extend(["cnfStyle", "vMerge"]);
+        let scope = self.scope(like);
+        let tcpr = without(&tcpr, &scope, &stripped).map_err(|e| e.on(like))?;
+        let open = scope.carried_to(&self.scope(row), &format!("<{name}>"));
+        let head = format!("{open}{tcpr}");
+        let info = CellInfo {
+            vertical_merge: None,
+            ..info
+        };
+        let cell = self.create(
+            NodeKind::Cell(info),
+            Support::Editable,
+            Made {
+                head,
+                tail,
+                like: None,
+            },
+            story,
+        );
+        self.attach(cell, row, self.n(row).children.len());
+        let first = self
+            .n(like)
+            .children
+            .iter()
+            .copied()
+            .find(|&c| matches!(self.n(c).kind, NodeKind::Paragraph(_)));
+        let paragraph = self.empty_paragraph(first, cell)?;
+        self.adopt(cell, paragraph);
+        Ok(cell)
     }
 
     pub(crate) fn compose_grid(&mut self, table: NodeId, widths: &[u32]) -> Result<(), EditError> {
-        let grid = self.grid_markup(table, widths);
+        let grid = self.grid_markup(table, widths)?;
         self.set_table_grid(table, &grid)?;
         Ok(())
     }
@@ -591,18 +586,19 @@ impl Document {
             "trPrChange",
         ];
         let props = rewrite(
-            &self.properties(row, "trPr"),
+            &self.properties(row, "trPr")?,
             &self.scope(row),
             &name,
             &order,
             &["gridBefore", "gridAfter"],
             set,
-        );
+        )
+        .map_err(|e| e.on(row))?;
         self.replace_properties(
             row,
             "trPr",
             &props,
-            |scope, e| matches!(scope.local(e), Some("gridBefore" | "gridAfter")),
+            |e| matches!(w_local(e), Some("gridBefore" | "gridAfter")),
             "only the omitted grid slots may change",
         )?;
         if let NodeKind::Row(info) = &mut self.nodes[row.index()].kind {
@@ -629,7 +625,8 @@ impl Document {
             },
             self.n(row).story,
         );
-        let p = self.empty_paragraph(None, cell);
+        self.attach(cell, row, self.n(row).children.len());
+        let p = self.bare_paragraph(cell);
         self.adopt(cell, p);
         cell
     }
@@ -693,29 +690,46 @@ impl Document {
             (Some(false), _) => Some("none"),
         };
         if span.is_some() || width.is_some() || merge.is_some() {
-            let props = self.cell_markup(id, span, width, merge);
+            let props = self.cell_markup(id, span, width, merge)?;
             self.compose_cell_properties(id, &props)?;
         }
         Ok(())
     }
     /// An empty paragraph with the properties of `like`, without its
     /// tracked changes, or a bare one.
-    pub(crate) fn empty_paragraph(&mut self, like: Option<NodeId>, near: NodeId) -> NodeId {
-        let story = self.n(near).story;
-        let name = self.w_name(like.unwrap_or(near), "p");
-        let open = format!("<{name}>");
-        let (info, head) = match like {
-            Some(like) => {
-                let (info, props) = self.paragraph_like(like, false);
-                // Later edits can reuse the template's raw paragraph properties.
-                // Bind their prefixes on the paragraph that receives them.
-                let open = self.scope(like).carried_to(&self.scope(near), &open);
-                (info, format!("{open}{props}"))
-            }
-            None => (ParagraphInfo::default(), open),
+    pub(crate) fn empty_paragraph(
+        &mut self,
+        like: Option<NodeId>,
+        near: NodeId,
+    ) -> Result<NodeId, EditError> {
+        let Some(like) = like else {
+            return Ok(self.bare_paragraph(near));
         };
+        let (info, props) = self.paragraph_like(like, false)?;
+        Ok(self.paragraph_from(Some(like), near, info, &props))
+    }
+
+    /// An empty paragraph with no properties.
+    fn bare_paragraph(&mut self, near: NodeId) -> NodeId {
+        self.paragraph_from(None, near, ParagraphInfo::default(), "")
+    }
+
+    fn paragraph_from(
+        &mut self,
+        like: Option<NodeId>,
+        near: NodeId,
+        info: ParagraphInfo,
+        props: &str,
+    ) -> NodeId {
+        let story = self.n(near).story;
+        let source = like.unwrap_or(near);
+        let name = self.w_name(source, "p");
+        // Both the paragraph name and its copied properties need their original bindings.
+        let open = self
+            .scope(source)
+            .carried_to(&self.content_scope(near), &format!("<{name}>"));
         let made = Made {
-            head,
+            head: format!("{open}{props}"),
             tail: format!("</{name}>"),
             like: like.and_then(|like| self.like(like)),
         };

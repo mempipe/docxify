@@ -337,16 +337,21 @@ impl Shape {
         let id = format!("{client}.{clock}");
         let key = format!("+{id}");
         let mut captured = Vec::new();
-        let mut capture = |table: NodeId, row: &str, origin: &str, template: NodeId| {
+        let mut capture = |table: NodeId,
+                           row: &str,
+                           origin: &str,
+                           template: NodeId|
+         -> Result<(), SessionError> {
             let p = doc
                 .n(template)
                 .children
                 .iter()
                 .copied()
                 .find(|p| matches!(doc.n(*p).kind, NodeKind::Paragraph(_)));
-            let properties = p
-                .map(|p| doc.paragraph_like(p, false).1)
-                .unwrap_or_default();
+            let properties = match p {
+                Some(p) => doc.paragraph_like(p, false)?.1,
+                None => String::new(),
+            };
             let numbering = p.and_then(|p| doc.list_ref(p)).map(|n| ListState {
                 basis: lists
                     .get(&n.num_id)
@@ -361,6 +366,7 @@ impl Shape {
                     numbering,
                 },
             ));
+            Ok(())
         };
         let op = match command {
             Command::InsertRow { row, below, like } => {
@@ -388,7 +394,7 @@ impl Shape {
                     }
                 }
                 for (origin, template) in templates {
-                    capture(table, &key, &origin, template.owner);
+                    capture(table, &key, &origin, template.owner)?;
                 }
                 Op::AddRow {
                     table,
@@ -413,7 +419,7 @@ impl Shape {
                         .iter()
                         .find(|c| c.start <= *like && *like < c.start + c.span)
                         .expect("validated row fills the grid");
-                    capture(*table, &self.row(row), &key, donor.owner);
+                    capture(*table, &self.row(row), &key, donor.owner)?;
                 }
                 Op::AddColumn {
                     table: *table,

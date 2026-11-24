@@ -265,6 +265,70 @@ fn a_fill_refuses_what_a_form_would_not_allow() {
 }
 
 #[test]
+fn a_fill_refuses_a_control_bound_with_word_2013_markup() {
+    let base = generated("content-controls");
+    let xml = part(&base, DOCUMENT);
+    assert!(xml.contains("<w:dataBinding "));
+    let xml = xml.replace(
+        "<w:dataBinding ",
+        r#"<w15:dataBinding xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" "#,
+    );
+    let bytes = rewrite(&base, DOCUMENT, Some(xml.as_bytes()));
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let command = fill(&doc, "Company", Fill::Text("Acme".into()));
+    let refused = doc.run(command);
+    assert!(
+        matches!(&refused, Err(SessionError::Edit(EditError::Refused { reason, .. }))
+            if *reason == "it is bound to custom XML, which a fill would leave stale"),
+        "{refused:?}"
+    );
+    assert!(doc.dirty_parts().is_empty());
+}
+
+#[test]
+fn a_fill_respects_protection_in_either_compatibility_branch() {
+    let base = generated("content-controls");
+    let xml = part(&base, DOCUMENT);
+    let wrapped = |property: &str, choice: bool| {
+        let (a, b) = if choice {
+            (property, "")
+        } else {
+            ("", property)
+        };
+        format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="w14">{a}</mc:Choice><mc:Fallback>{b}</mc:Fallback></mc:AlternateContent>"#
+        )
+    };
+    for (alias, tag, reason) in [
+        ("Company", "<w:dataBinding ", "bound to custom XML"),
+        ("Reference", "<w:lock ", "locked against editing"),
+    ] {
+        let start = xml.find(tag).unwrap();
+        let end = start + xml[start..].find("/>").unwrap() + 2;
+        for choice in [true, false] {
+            let mut alternate = xml.clone();
+            alternate.replace_range(start..end, &wrapped(&xml[start..end], choice));
+            let bytes = rewrite(&base, DOCUMENT, Some(alternate.as_bytes()));
+            let mut doc = EditingDocument::open(&bytes).unwrap();
+            let cmd = fill(&doc, alias, Fill::Text("Changed".into()));
+            assert!(doc.run(cmd).unwrap_err().to_string().contains(reason));
+            assert!(doc.dirty_parts().is_empty());
+        }
+    }
+    // The choice protects the value and the fallback protects the container.
+    let alternate = xml.replace(
+        r#"<w:lock w:val="contentLocked"/>"#,
+        r#"<mc:AlternateContent><mc:Choice Requires="w14"><w:lock w:val="contentLocked"/></mc:Choice><mc:Fallback><w:lock w:val="sdtLocked"/></mc:Fallback></mc:AlternateContent>"#,
+    );
+    let bytes = rewrite(&base, DOCUMENT, Some(alternate.as_bytes()));
+    let doc = Document::open(&bytes).unwrap();
+    assert!(
+        matches!(&doc.node(control(&doc, "Reference")).unwrap().kind,
+        NodeKind::ContentControl { lock: Some(lock), .. } if lock == "sdtContentLocked")
+    );
+}
+
+#[test]
 fn a_check_box_fills_whatever_prefix_the_document_gives_word_2010_markup() {
     let base = generated("content-controls");
     let xml = part(&base, DOCUMENT)
@@ -410,4 +474,91 @@ fn a_fill_keeps_the_namespace_its_copied_run_properties_were_written_in() {
     );
     assert!(doc.0.undo() && doc.0.undo());
     assert_eq!(entries(&doc.export().unwrap()), entries(&bytes));
+}
+
+#[test]
+fn fills_use_the_actual_content_wrapper_namespace() {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for (block, empty) in [(false, false), (true, false), (true, true)] {
+        let run = "<q:r><q:rPr><q:b/></q:rPr><q:t>Old</q:t></q:r>";
+        let value = if empty {
+            "<q:p/>".to_string()
+        } else if block {
+            format!("<q:p>{run}</q:p>")
+        } else {
+            run.to_string()
+        };
+        let control_xml = format!(
+            r#"<w:sdt><w:sdtPr><w:alias w:val="Name"/><w:text/></w:sdtPr><q:sdtContent xmlns:q="{W}" xmlns:w="urn:extension">{value}</q:sdtContent></w:sdt>"#
+        );
+        let body = if block {
+            control_xml
+        } else {
+            format!("<w:p>{control_xml}</w:p>")
+        };
+        let bytes = with_body(&body);
+        let mut doc = EditingDocument::open(&bytes).unwrap();
+        let cmd = fill(&doc, "Name", Fill::Text("New".into()));
+        edit(&mut doc, cmd);
+        let opened = reopen("control content scope", &doc);
+        for view in [&*doc, &opened] {
+            let id = control(view, "Name");
+            assert_eq!(shown(view, id), "New");
+            assert_eq!(run_props(view, id).bold, (!empty).then_some(true));
+        }
+        assert_editor_undo("control content scope", &bytes, &mut doc);
+    }
+}
+
+#[test]
+fn a_fill_requires_a_type_outside_compatibility_branches() {
+    let alternate = |choice: &str, fallback: &str| {
+        format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="w14">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
+        )
+    };
+    let checkbox = r#"<w14:checkbox><w14:checked w14:val="1"/></w14:checkbox>"#;
+    let cases = [
+        ("<w:sdtPr><x:picture/><w:text/></w:sdtPr>".into(), true),
+        (
+            format!("<w:sdtPr>{}</w:sdtPr>", alternate(checkbox, "<w:text/>")),
+            false,
+        ),
+        (
+            alternate(
+                "<w:sdtPr><w:text/></w:sdtPr>",
+                &format!("<w:sdtPr>{checkbox}</w:sdtPr>"),
+            ),
+            false,
+        ),
+        (
+            format!(
+                "<w:sdtPr><w:text/>{}</w:sdtPr>",
+                alternate("<w:tag w:val=\"Name\"/>", "<x:picture/>")
+            ),
+            true,
+        ),
+    ];
+    for (properties, allowed) in cases {
+        let bytes = with_body(&format!("<w:p><w:sdt>{properties}<w:sdtContent><w:r><w:t>☒</w:t></w:r></w:sdtContent></w:sdt></w:p>"));
+        let mut doc = EditingDocument::open(&bytes).unwrap();
+        let control = doc
+            .descendants(doc.paragraphs()[0])
+            .into_iter()
+            .find(|&id| matches!(doc.node(id).unwrap().kind, NodeKind::ContentControl { .. }))
+            .unwrap();
+        let result = doc.run(Command::FillContentControl {
+            control,
+            fill: Fill::Text("Hello".into()),
+        });
+        if allowed {
+            result.unwrap();
+            let reopened = Document::open(&doc.export().unwrap()).unwrap();
+            assert_eq!(shown(&reopened, control), "Hello");
+        } else {
+            assert!(result.is_err(), "{properties}");
+            assert!(!doc.0.undo());
+            assert_eq!(doc.export().unwrap(), bytes);
+        }
+    }
 }

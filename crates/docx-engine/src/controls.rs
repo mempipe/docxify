@@ -15,7 +15,7 @@ use crate::format::{self as markup, without};
 use crate::import::IN_CONTENT_CONTROL;
 use crate::ir::{Control, ListItem, Made, NodeId, NodeKind, ParagraphInfo, RunInfo, Support};
 use crate::structure::{fits, refuse};
-use crate::xml::{child, elements, escape_attr, is, on_off, w_attr, W, W14};
+use crate::xml::{child, elements, escape_attr, is, on_off, w_attr, w_local, MC, W, W14, W15};
 use crate::Document;
 
 /// Type elements that hold nothing a value fills.
@@ -31,8 +31,58 @@ const OTHER: [&str; 9] = [
     "repeatingSectionItem",
 ];
 
+/// Visit children in every possible compatibility branch, without descending
+/// into unrelated properties or into the contents of a nested control.
+fn possible_children<'a, 'i>(parent: X<'a, 'i>, visit: &mut impl FnMut(X<'a, 'i>)) {
+    for node in elements(parent) {
+        if is(node, MC, "AlternateContent") {
+            for branch in elements(node).filter(|b| is(*b, MC, "Choice") || is(*b, MC, "Fallback"))
+            {
+                possible_children(branch, visit);
+            }
+        } else {
+            visit(node);
+        }
+    }
+}
+
+/// Writes must respect the type and protection in every branch a consumer could open.
+pub(crate) fn read_control(sdt: X) -> (Control, bool, bool, Option<String>) {
+    let (mut control, placeholder) = control_of(child(sdt, W, "sdtPr"));
+    let mut bound = false;
+    let mut lock = None;
+    possible_children(sdt, &mut |props| {
+        if !is(props, W, "sdtPr") {
+            return;
+        }
+        possible_children(props, &mut |p| {
+            if (props.parent() != Some(sdt) || p.parent() != Some(props)) && type_of(p).is_some() {
+                control = Control::Other {
+                    element: "mc:AlternateContent".into(),
+                };
+            }
+            bound |= is(p, W, "dataBinding") || is(p, W15, "dataBinding");
+            if is(p, W, "lock") {
+                lock = match (lock, w_attr(p, "val")) {
+                    (Some("contentLocked"), Some("sdtLocked"))
+                    | (Some("sdtLocked"), Some("contentLocked"))
+                    | (_, Some("sdtContentLocked")) => Some("sdtContentLocked"),
+                    (Some("sdtContentLocked"), _) => lock,
+                    (_, next @ Some("contentLocked" | "sdtLocked")) => next,
+                    (_, next) => lock.or(next),
+                };
+            }
+        });
+    });
+    (control, placeholder, bound, lock.map(str::to_owned))
+}
+
+pub(crate) fn deletion_locked(lock: Option<&str>) -> bool {
+    matches!(lock, Some("sdtLocked" | "sdtContentLocked"))
+}
+
 /// What a content control holds, and whether it shows its placeholder.
-pub(crate) fn control_of(props: Option<X>) -> (Control, bool) {
+fn control_of(props: Option<X>) -> (Control, bool) {
     let Some(props) = props else {
         return (Control::RichText, false);
     };
@@ -94,8 +144,10 @@ fn type_of(e: X) -> Option<Control> {
         });
     }
     let local = e.tag_name().name();
-    OTHER.contains(&local).then(|| Control::Other {
-        element: local.to_string(),
+    (matches!(e.tag_name().namespace(), Some(W | W14 | W15)) && OTHER.contains(&local)).then(|| {
+        Control::Other {
+            element: local.to_string(),
+        }
     })
 }
 
@@ -143,9 +195,9 @@ impl Document {
         if let Some(reason) = self.content_refusal(id) {
             return refuse(id, reason);
         }
-        let current = self.properties(id, "sdtPr");
+        let current = self.properties(id, "sdtPr")?;
         let scope = self.scope(id);
-        let cleared = without(&current, &scope, &["showingPlcHdr"]);
+        let cleared = without(&current, &scope, &["showingPlcHdr"]).map_err(|e| e.on(id))?;
         let property = |ns, types: &[&str], child_name, attr, value: &str| {
             edit_property(&scope, &cleared, ns, types, child_name, attr, value).ok_or(
                 EditError::Refused {
@@ -204,7 +256,7 @@ impl Document {
             }
             _ => return refuse(id, "the control takes another kind of value"),
         };
-        let run_properties = self.control_run(id, placeholder, &current);
+        let run_properties = self.control_run(id, placeholder, &current)?;
         Ok(ControlValue {
             text,
             properties,
@@ -274,22 +326,29 @@ impl Document {
     /// The properties of the run a fill makes, readable where the control
     /// is: those the control's properties give while the placeholder shows,
     /// and else those of its first run.
-    fn control_run(&self, id: NodeId, placeholder: bool, properties: &str) -> String {
+    fn control_run(
+        &self,
+        id: NodeId,
+        placeholder: bool,
+        properties: &str,
+    ) -> Result<String, EditError> {
         let scope = self.scope(id);
         let first_run = self
             .descendants(id)
             .into_iter()
             .find(|&r| matches!(self.n(r).kind, NodeKind::Run(_)));
-        match (placeholder, first_run) {
+        Ok(match (placeholder, first_run) {
             (false, Some(run)) => self
                 .scope(run)
-                .carried_to(&scope, &self.properties(run, "rPr")),
+                .carried_to(&scope, &self.properties(run, "rPr")?),
             _ => {
-                let rpr = markup::child(properties, &scope, "rPr").unwrap_or_default();
+                let rpr = markup::child(properties, &scope, "rPr").map_err(|e| e.on(id))?;
                 let open = markup::tag_end(properties, 0).unwrap_or(0);
-                scope.within(&properties[..open]).carried_to(&scope, rpr)
+                scope
+                    .within(&properties[..open])
+                    .carried_to(&scope, rpr.unwrap_or_default())
             }
-        }
+        })
     }
 
     fn filled_content(
@@ -318,7 +377,26 @@ impl Document {
             self.w_name(id, "t"),
             self.w_name(id, "br"),
         );
-        let run_made = made(r.clone(), format!("<{r}>{rpr}"));
+        let mut into = self.content_scope(id);
+        let mut paragraph = None;
+        if fits(
+            &NodeKind::Paragraph(Box::<ParagraphInfo>::default()),
+            &self.n(parent).kind,
+        ) {
+            let like = self
+                .n(id)
+                .children
+                .iter()
+                .copied()
+                .find(|&child| matches!(self.n(child).kind, NodeKind::Paragraph(_)));
+            let made = self.empty_paragraph(like, id)?;
+            self.nodes[made.index()].support = read_only;
+            let head = self.head(made);
+            into = into.within(&head[..markup::tag_end(&head, 0).expect("paragraph start tag")]);
+            paragraph = Some(made);
+        }
+        let open = self.scope(id).carried_to(&into, &format!("<{r}>"));
+        let run_made = made(r.clone(), format!("{open}{rpr}"));
         let run = self.create(NodeKind::Run(Box::new(info)), read_only, run_made, story);
         for (i, line) in text.split('\n').enumerate() {
             if i > 0 {
@@ -340,39 +418,31 @@ impl Document {
                 self.adopt(run, node);
             }
         }
-        let paragraph = NodeKind::Paragraph(Box::<ParagraphInfo>::default());
-        if !fits(&paragraph, &self.n(parent).kind) {
-            return Ok(run);
+        if let Some(paragraph) = paragraph {
+            self.adopt(paragraph, run);
+            Ok(paragraph)
+        } else {
+            Ok(run)
         }
-        let like = self
-            .n(id)
-            .children
-            .iter()
-            .copied()
-            .find(|&c| matches!(self.n(c).kind, NodeKind::Paragraph(_)));
-        let paragraph = self.empty_paragraph(like, id);
-        self.nodes[paragraph.index()].support = read_only;
-        self.adopt(paragraph, run);
-        Ok(paragraph)
     }
 
     fn compose_control_properties(
         &mut self,
         id: NodeId,
         properties: &str,
-    ) -> Result<String, EditError> {
+    ) -> Result<(), EditError> {
         let (control, placeholder) = self
             .read_markup(id, properties, |p| control_of(Some(p)))?
             .unwrap_or((Control::RichText, false));
-        let current = self.replace_properties(
+        self.replace_properties(
             id,
             "sdtPr",
             properties,
-            |scope, e| {
+            |e| {
                 matches!(
-                    scope.local(e),
+                    w_local(e),
                     Some("showingPlcHdr" | "dropDownList" | "comboBox" | "date")
-                ) || scope.local_in(e, W14) == Some("checkbox")
+                ) || is(e, W14, "checkbox")
             },
             "only the placeholder flag and a check box, list or date can change this way",
         )?;
@@ -382,9 +452,13 @@ impl Document {
             ..
         } = &mut self.nodes[id.index()].kind
         {
-            (*c, *p) = (control, placeholder);
+            // A merged fill updates the value. The source type still determines fill eligibility.
+            if !matches!(c, Control::Other { .. }) {
+                *c = control;
+            }
+            *p = placeholder;
         }
-        Ok(current)
+        Ok(())
     }
 }
 
@@ -399,47 +473,51 @@ fn edit_property(
     attr: &str,
     value: &str,
 ) -> Option<String> {
-    let head = format!("<scope{}>", scope.declarations());
-    let wrapped = format!("{head}{properties}</scope>");
-    let doc = crate::xml::parse("content control", &wrapped).ok()?;
-    let props = doc.root_element().first_element_child()?;
-    let kind = elements(props).find(|e| types.iter().any(|name| is(*e, ns, name)))?;
-    let target = match child_name {
-        Some(name) => child(kind, ns, name),
-        None => Some(kind),
-    };
-    let mut edited = properties.to_owned();
-    if let Some(attribute) = target.and_then(|n| n.attribute_node((ns, attr))) {
-        let range = attribute.range_value();
-        // Keep the source's quote style when replacing just the value.
-        let mut escaped = escape_attr(value);
-        if wrapped.as_bytes()[range.start - 1] == b'\'' {
-            escaped = escaped.replace('\'', "&apos;");
-        }
-        edited.replace_range(range.start - head.len()..range.end - head.len(), &escaped);
-    } else {
-        let node = target.unwrap_or(kind);
-        let range = node.range();
-        let source = &wrapped[range.clone()];
-        let name = markup::Scope::from_element(node).attribute(
-            ns,
-            if ns == W14 { "w14" } else { "w" },
-            attr,
-        );
-        let updated = match (target, child_name) {
-            (None, Some(child)) => first_child(
-                source,
-                &format!(
-                    "<{}{child} {name}=\"{}\"/>",
-                    prefix_of(source),
-                    escape_attr(value)
-                ),
-            ),
-            _ => markup::add_attribute(source, &name, &escape_attr(value)),
+    let edited = scope.read(properties, "", |props, offset| {
+        let kind = elements(props).find(|e| types.iter().any(|name| is(*e, ns, name)))?;
+        let target = match child_name {
+            Some(name) => child(kind, ns, name),
+            None => Some(kind),
         };
-        edited.replace_range(range.start - head.len()..range.end - head.len(), &updated);
-    }
-    Some(edited)
+        let mut edited = properties.to_owned();
+        if let Some(attribute) = target.and_then(|n| n.attribute_node((ns, attr))) {
+            let range = attribute.range_value();
+            let range = range.start - offset..range.end - offset;
+            // Keep the source's quote style when replacing just the value.
+            let mut escaped = escape_attr(value);
+            if properties.as_bytes()[range.start - 1] == b'\'' {
+                escaped = escaped.replace('\'', "&apos;");
+            }
+            edited.replace_range(range, &escaped);
+        } else {
+            let node = target.unwrap_or(kind);
+            let range = node.range().start - offset..node.range().end - offset;
+            let source = &properties[range.clone()];
+            // The bindings where the attribute goes: those each start tag
+            // on the way to it declares.
+            let mut inside = scope.clone();
+            for element in [Some(props), Some(kind), target].into_iter().flatten() {
+                let start = element.range().start - offset;
+                let end = markup::tag_end(properties, start).unwrap_or(properties.len());
+                inside = inside.within(&properties[start..end]);
+            }
+            let name = inside.attribute(ns, if ns == W14 { "w14" } else { "w" }, attr);
+            let updated = match (target, child_name) {
+                (None, Some(child)) => first_child(
+                    source,
+                    &format!(
+                        "<{}{child} {name}=\"{}\"/>",
+                        prefix_of(source),
+                        escape_attr(value)
+                    ),
+                ),
+                _ => markup::add_attribute(source, &name, &escape_attr(value)),
+            };
+            edited.replace_range(range, &updated);
+        }
+        Some(edited)
+    });
+    edited.ok().flatten()
 }
 
 /// Refuses text a control could not hold: none, a tab, a carriage return,

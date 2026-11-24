@@ -373,8 +373,7 @@ pub struct DrawingInfo {
     /// `r:embed` / `r:link` relationship IDs and the parts or URLs they resolve to.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub media: Vec<MediaRef>,
-    /// Something inside that points elsewhere, such as a comment or a
-    /// bookmark end, which removing the drawing would leave dangling.
+    /// An enclosed reference or control lock that prevents removing the drawing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holds: Option<&'static str>,
     pub placement: Placement,
@@ -669,11 +668,15 @@ pub enum NodeKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         alias: Option<String>,
         data_bound: bool,
-        /// `w:lock`: `sdtLocked` or `sdtContentLocked` forbid deleting it,
+        /// The combined locks of its possible markup branches.
+        /// `sdtLocked` or `sdtContentLocked` forbid deleting it,
         /// and `contentLocked` or `sdtContentLocked` editing its content.
         #[serde(skip_serializing_if = "Option::is_none")]
         lock: Option<String>,
         control: Control,
+        /// Source offset of the unmodeled sdtContent wrapper.
+        #[serde(skip)]
+        content_start: Option<usize>,
         /// `w:showingPlcHdr`: the content is the placeholder, not a value.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         placeholder: bool,
@@ -697,8 +700,7 @@ pub enum NodeKind {
         namespace: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         text_preview: Option<String>,
-        /// Something inside that points elsewhere, which removing the element
-        /// would leave dangling.
+        /// An enclosed reference or control lock that prevents removing the element.
         #[serde(skip_serializing_if = "Option::is_none")]
         holds: Option<&'static str>,
     },
@@ -798,9 +800,9 @@ pub struct Node {
     /// node, so moving children keeps the source's formatting.
     pub(crate) lead: usize,
     /// The span from the first child's start to the last child's end, as
-    /// imported. Before it are the start tag and property elements; after it,
-    /// the end tag. A container with no children has an empty span at its
-    /// end tag, or at its end when the element is self-closing.
+    /// imported. A split source run can extend the span to its end tag when
+    /// a later fragment takes its trailing markup. A childless container has
+    /// an empty span at its end tag or self-closing end.
     pub(crate) inner: Range<usize>,
     /// Markup for a node a command created, which has no source bytes.
     pub(crate) made: Option<Box<Made>>,

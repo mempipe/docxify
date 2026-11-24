@@ -29,6 +29,33 @@ fn tracked(from: Point, to: Point, text: &str, track: &Track) -> Command {
     }
 }
 
+#[test]
+fn tracked_edits_require_a_real_utc_timestamp() {
+    let bytes = generated("simple-paragraphs");
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let point = Point::Start {
+        start: doc.paragraphs()[0],
+    };
+    for date in [
+        "2026-02-29T10:00:00Z",
+        "2024-02-29T25:75:80Z",
+        "2024-02-29T10:00:00",
+    ] {
+        let track = Track {
+            date: date.into(),
+            ..alice()
+        };
+        assert!(doc.run(tracked(point, point, "x", &track)).is_err());
+        assert!(!doc.0.undo());
+    }
+    let valid = Track {
+        date: "2024-02-29T23:59:59Z".into(),
+        ..alice()
+    };
+    edit(&mut doc, tracked(point, point, "x", &valid));
+    assert!(part(&doc.export().unwrap(), DOCUMENT).contains(&valid.date));
+}
+
 /// The body's paragraphs as `document.xml` writes them.
 fn body(doc: &Document) -> String {
     let xml = part(&doc.export().unwrap(), DOCUMENT);
@@ -513,4 +540,187 @@ fn removing_a_session_insertion_is_refused_without_consuming_undo() {
     assert!(doc.run(Command::RemoveNode { node: rev }).is_err());
     assert_eq!(doc.export().unwrap(), before);
     assert_editor_undo("session insertion", &bytes, &mut doc);
+}
+
+#[test]
+fn split_numbers_a_copied_format_revision_in_its_source_scope() {
+    let bytes = with_body(
+        r#"<w:p xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:rPr><x:rPrChange x:id="4" x:author="Ada"><w:rPr><w:b/></w:rPr></x:rPrChange></w:rPr><w:t>Hello</w:t></w:r></w:p>"#,
+    );
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let node = text_node(&doc, "Hello");
+    edit(
+        &mut doc,
+        Command::SplitParagraph {
+            at: Point::Text { node, offset: 1 },
+        },
+    );
+    let xml = part(&doc.export().unwrap(), DOCUMENT);
+    let tree = roxmltree::Document::parse(&xml).unwrap();
+    let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let ids: Vec<_> = tree
+        .descendants()
+        .filter(|e| e.has_tag_name((w, "rPrChange")))
+        .map(|e| e.attribute((w, "id")).unwrap())
+        .collect();
+    assert_eq!(ids, ["4", "5"]);
+}
+
+#[test]
+fn tracked_enter_preserves_the_namespaces_of_the_mark_and_its_neighbours() {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for properties in [
+        "<q:rPr><w:ext/><q:b/></q:rPr>".to_owned(),
+        format!(r#"<w:rPr xmlns:w="{W}"><e:ext xmlns:e="urn:other"/><w:b/></w:rPr>"#),
+    ] {
+        let bytes = with_body(&format!(
+            r#"<w:p><q:pPr xmlns:q="{W}" xmlns:w="urn:other">{properties}</q:pPr><w:r><w:t>Hello</w:t></w:r></w:p>"#
+        ));
+        let mut doc = EditingDocument::open(&bytes).unwrap();
+        let at = at(text_node(&doc, "Hello"), 2);
+        edit(&mut doc, tracked(at, at, "\n", &alice()));
+        let out = doc.export().unwrap();
+        let reopened = Document::open(&out).unwrap();
+        for view in [&*doc, &reopened] {
+            let NodeKind::Paragraph(info) = &view.node(view.paragraphs()[0]).unwrap().kind else {
+                panic!("expected paragraph")
+            };
+            assert_eq!(info.mark_revision.as_deref(), Some("ins"));
+        }
+        let xml = part(&out, DOCUMENT);
+        let tree = roxmltree::Document::parse(&xml).unwrap();
+        let ext: Vec<_> = tree
+            .descendants()
+            .filter(|n| n.tag_name().name() == "ext")
+            .collect();
+        assert_eq!(ext.len(), 2);
+        assert!(
+            ext.iter().all(|n| n.has_tag_name(("urn:other", "ext"))),
+            "{xml}"
+        );
+        assert_editor_undo("tracked Enter", &bytes, &mut doc);
+    }
+}
+
+#[test]
+fn tracked_deletion_preserves_the_source_leaf_attributes_and_lead() {
+    let base = with_body(
+        r#"<w:p><w:r><w:t>first</w:t><!--gap--><w:t xmlns:q="urn:review" q:origin="label">abcd</w:t></w:r></w:p>"#,
+    );
+    for (start, end, removed) in [(0, 4, "abcd"), (0, 2, "ab"), (1, 3, "bc")] {
+        let mut doc = EditingDocument::open(&base).unwrap();
+        let leaf = text_node(&doc, "abcd");
+        edit(
+            &mut doc,
+            tracked(at(leaf, start), at(leaf, end), "", &alice()),
+        );
+        let out = doc.export().unwrap();
+        Document::open(&out).unwrap();
+        let xml = part(&out, DOCUMENT);
+        let tree = roxmltree::Document::parse(&xml).unwrap();
+        let deleted = tree
+            .descendants()
+            .find(|n| n.tag_name().name() == "delText")
+            .unwrap();
+        assert_eq!(deleted.text(), Some(removed));
+        assert_eq!(deleted.attribute(("urn:review", "origin")), Some("label"));
+        assert_eq!(xml.matches("<!--gap-->").count(), 1);
+        assert_editor_undo("tracked deletion", &base, &mut doc);
+    }
+}
+
+#[test]
+fn wrapping_a_run_keeps_its_foreign_properties_in_their_namespace() {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let bytes = with_body(&format!(
+        r#"<p xmlns="{W}" xmlns:w="urn:extension"><r><rPr><w:b/></rPr><t>hello</t></r></p>"#
+    ));
+    for wrapper in ["del", "hyperlink"] {
+        let mut doc = EditingDocument::open(&bytes).unwrap();
+        let node = text_node(&doc, "hello");
+        let (from, to) = (at(node, 1), at(node, 3));
+        let command = if wrapper == "del" {
+            tracked(from, to, "", &alice())
+        } else {
+            Command::SetLink {
+                from,
+                to,
+                target: Some("#top".into()),
+            }
+        };
+        edit(&mut doc, command);
+        let out = doc.export().unwrap();
+        let reopened = Document::open(&out).unwrap();
+        for view in [&*doc, &reopened] {
+            for id in view.descendants(view.paragraphs()[0]) {
+                if let NodeKind::Run(info) = &view.node(id).unwrap().kind {
+                    assert_ne!(info.props.bold, Some(true), "{wrapper}");
+                }
+            }
+        }
+        let xml = part(&out, DOCUMENT);
+        let tree = roxmltree::Document::parse(&xml).unwrap();
+        let wrapped = tree
+            .descendants()
+            .find(|n| n.has_tag_name((W, wrapper)))
+            .unwrap();
+        assert!(
+            wrapped
+                .descendants()
+                .any(|n| n.has_tag_name(("urn:extension", "b"))),
+            "{xml}"
+        );
+    }
+}
+
+#[test]
+fn a_tracked_insertion_in_a_split_cell_uses_the_tables_namespace_bindings() {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for prefix in [
+        "",
+        r#"xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+    ] {
+        let bytes = with_body(&format!(
+            r#"<tbl xmlns="{W}" xmlns:w="urn:extension" {prefix}><tr><tc><p><r><t>A</t></r></p></tc></tr></tbl>"#
+        ));
+        let mut doc = EditingDocument::open(&bytes).unwrap();
+        let p = doc.paragraphs()[0];
+        let end = Point::End { end: p };
+        edit(&mut doc, tracked(end, end, "\n", &alice()));
+        let start = Point::Start {
+            start: doc.paragraphs()[1],
+        };
+        edit(&mut doc, tracked(start, start, "X", &alice()));
+        let xml = part(&doc.export().unwrap(), DOCUMENT);
+        let tree = roxmltree::Document::parse(&xml).unwrap();
+        let insertion = tree
+            .descendants()
+            .find(|n| {
+                n.has_tag_name((W, "ins"))
+                    && n.descendants()
+                        .any(|t| t.is_text() && t.text() == Some("X"))
+            })
+            .unwrap();
+        assert_eq!(insertion.attribute((W, "author")), Some("Alice"), "{xml}");
+        assert_eq!(insertion.attribute((W, "date")), Some(DATE));
+        assert!(insertion.attribute((W, "id")).is_some());
+    }
+}
+
+#[test]
+fn revision_ids_stay_within_what_word_reads() {
+    // A bookmark holds the highest ID Word reads.
+    let bytes = with_body(
+        r#"<w:p><w:bookmarkStart w:id="2147483647" w:name="mark"/><w:r><w:t>Marked</w:t></w:r><w:bookmarkEnd w:id="2147483647"/></w:p><w:p><w:r><w:t>Other</w:t></w:r></w:p>"#,
+    );
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    for needle in ["Marked", "Other"] {
+        let t = text_node(&doc, needle);
+        edit(&mut doc, tracked(at(t, 0), at(t, 0), "Now ", &alice()));
+    }
+    let body = body(&doc);
+    for id in [1, 2] {
+        assert!(body.contains(&ins(id, &alice(), &run("Now "))), "{body}");
+    }
+    assert_valid("revisions", &doc.export().unwrap());
 }

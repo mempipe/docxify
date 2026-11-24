@@ -8,7 +8,7 @@
 
 use crate::edit::{Change, Format, Track};
 use crate::error::EditError;
-use crate::format::{declarations, tag_end};
+use crate::format::Scope;
 use crate::ir::{Made, NodeId, NodeKind, Support};
 use crate::structure::{fits, refuse, Leaf};
 use crate::Document;
@@ -137,7 +137,9 @@ impl Document {
     /// A new, empty run or hyperlink with the start tag and properties of
     /// `node`, in no container yet. A tracked change `node`'s properties
     /// record is a change of the copy's own, which export gives its own ID.
-    pub(crate) fn empty_like(&mut self, node: NodeId) -> Result<NodeId, EditError> {
+    /// With `whole`, the copy also takes the other markup before `node`'s
+    /// first child, which one copy alone may hold.
+    pub(crate) fn empty_like(&mut self, node: NodeId, whole: bool) -> Result<NodeId, EditError> {
         let kind = &self
             .nodes
             .get(node.index())
@@ -150,49 +152,31 @@ impl Document {
                 expected: "a run or hyperlink",
             });
         }
-        let (story, head) = (self.n(node).story, self.head(node));
-        let Some(head) = self.renumbered(story, &head) else {
+        let head = match whole {
+            true => self.head(node),
+            false => self.bare_head(node)?,
+        };
+        let Some(head) = self.renumbered(node, &head) else {
             return refuse(node, "its properties cannot be read to copy");
         };
-        let copy = self.copy_of(node, 0);
-        if let Some(made) = &mut self.nodes[copy.index()].made {
-            made.head = head;
-        }
-        Ok(copy)
+        let made = Made {
+            head,
+            tail: format!("</{}>", self.element_name(node)),
+            like: self.like(node),
+        };
+        Ok(self.create(kind.clone(), Support::Editable, made, self.n(node).story))
     }
 
-    /// Declares on `node` each namespace the start tag of the source element
-    /// `from` declares and `node` does not. Content that moves out of `from`
-    /// can use a prefix only `from` declared.
-    pub(crate) fn declare_namespaces(&mut self, node: NodeId, from: NodeId) {
-        let source = self.n(from);
-        if source.made.is_some() {
-            return;
+    /// Preserve the meaning of a fragment when it is placed in a different XML scope.
+    pub(crate) fn declare_namespaces(&mut self, node: NodeId, source: &Scope, into: &Scope) {
+        let current = self.head(node);
+        let head = source.carried_to(into, &current);
+        if current != head {
+            self.set_head(node, head);
         }
-        let text = self.story_text(source);
-        let Some(end) = tag_end(text, source.range.start) else {
-            return;
-        };
-        let tag = &text[source.range.start..end];
-        if !tag.contains("xmlns") {
-            return;
-        }
-        let head = self.head(node);
-        let open = tag_end(&head, 0).unwrap_or(head.len());
-        let own = declarations(&head[..open]);
-        let missing: String = declarations(tag)
-            .into_iter()
-            .filter(|(name, _)| own.iter().all(|(declared, _)| declared != name))
-            .map(|(name, value)| format!(" {name}={value}"))
-            .collect();
-        if missing.is_empty() {
-            return;
-        }
-        let at = match head[..open].ends_with("/>") {
-            true => open - 2,
-            false => open - 1,
-        };
-        let head = format!("{}{missing}{}", &head[..at], &head[at..]);
+    }
+
+    fn set_head(&mut self, node: NodeId, head: String) {
         let placed = &mut self.nodes[node.index()];
         match &mut placed.made {
             Some(made) => made.head = head,
@@ -202,6 +186,42 @@ impl Document {
             }
         }
         self.mark_ancestors(node);
+    }
+
+    /// Leaves a run only its start tag and properties before its children.
+    /// A copy before it has the rest.
+    pub(crate) fn clear_lead(&mut self, run: NodeId) -> Result<(), EditError> {
+        let head = self.bare_head(run)?;
+        self.set_head(run, head);
+        Ok(())
+    }
+
+    /// Writes `trail` between the children and the end tag of a copy that
+    /// [`empty_like`](Document::empty_like) made.
+    pub(crate) fn set_trail(&mut self, copy: NodeId, trail: &str) {
+        let tail = format!("{trail}</{}>", self.element_name(copy));
+        if let Some(made) = &mut self.nodes[copy.index()].made {
+            made.tail = tail;
+        }
+        self.mark_ancestors(copy);
+    }
+
+    /// Leaves a run or hyperlink only its end tag after its children. A
+    /// part after it has the rest.
+    pub(crate) fn clear_trail(&mut self, id: NodeId) {
+        if self.n(id).made.is_some() {
+            return self.set_trail(id, "");
+        }
+        let node = self.n(id);
+        let source = &self.story_text(node)[node.range.clone()];
+        let Some(end_tag) = source.rfind("</") else {
+            return;
+        };
+        // The tail of a source node is read from where its children end.
+        let node = &mut self.nodes[id.index()];
+        node.inner.end = node.range.start + end_tag;
+        node.dirty = true;
+        self.mark_ancestors(id);
     }
 
     /// A new, empty run for a paragraph of `near`'s story, in no container
@@ -254,8 +274,8 @@ impl Document {
                 expected: "a run within a paragraph",
             });
         }
-        let properties = self.formatted(run, format);
-        self.compose_run_properties(run, &properties).map(drop)
+        let properties = self.formatted(run, format)?;
+        self.compose_run_properties(run, &properties)
     }
 
     /// Builds a tracked-change wrapper without applying an editing command.
@@ -303,14 +323,11 @@ impl Document {
     }
 
     /// Deleted text has its own OOXML element; it stays available to review.
-    pub(crate) fn loose_deleted_text(
-        &mut self,
-        near: NodeId,
-        text: &str,
-    ) -> Result<NodeId, EditError> {
-        let node = self.loose_text(near, text)?;
-        self.nodes[node.index()].kind = NodeKind::DeletedText { text: text.into() };
-        Ok(node)
+    pub(crate) fn mark_text_deleted(&mut self, id: NodeId, text: String) {
+        let leaf = &mut self.nodes[id.index()];
+        leaf.kind = NodeKind::DeletedText { text };
+        leaf.dirty = true;
+        self.mark_ancestors(id);
     }
 
     /// A new line break, in no container yet.

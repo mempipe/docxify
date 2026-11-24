@@ -23,6 +23,7 @@ mod export;
 mod fields;
 pub mod flow;
 mod format;
+mod ids;
 mod import;
 mod inspect;
 pub mod ir;
@@ -52,7 +53,7 @@ pub use lists::{ListKind, MAX_LEVEL};
 use package::Package;
 pub use validate::{validate_package, Issue, ValidationReport};
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use package::{
     REL_COMMENTS, REL_ENDNOTES, REL_FOOTER, REL_FOOTNOTES, REL_HEADER, REL_NUMBERING, REL_SETTINGS,
@@ -90,11 +91,8 @@ pub struct Document {
     added_link_style: Option<String>,
     /// Media `add_media` added.
     added_media: Vec<pictures::AddedMedia>,
-    /// The `wp:docPr` IDs of the drawings the document opened with.
-    drawing_ids: BTreeSet<u32>,
-    /// The highest `w:id` in any story the document opened with. Export
-    /// numbers the revisions commands made above it.
-    revision_ids: u32,
+    /// The numbers the document opened with.
+    source_ids: ids::SourceIds,
     /// The part that records comment threads, if the document has one.
     comments_extended: Option<String>,
     settings: Settings,
@@ -121,8 +119,7 @@ impl Document {
             added_lists: Vec::new(),
             added_link_style: None,
             added_media: Vec::new(),
-            drawing_ids: BTreeSet::new(),
-            revision_ids: 0,
+            source_ids: ids::SourceIds::default(),
             comments_extended: None,
             settings: Settings::default(),
             theme: Theme::default(),
@@ -149,12 +146,16 @@ impl Document {
         }
         if let Some(part) = doc.package.related_part(&main, REL_STYLES) {
             let text = doc.package.read_text(&part)?;
-            doc.styles = Styles::parse(&part, &text.text, &theme)?;
+            let parsed = xml::parse(&part, &text.text)?;
+            doc.source_ids.read(&parsed);
+            doc.styles = Styles::from_root(&part, parsed.root_element(), &theme);
             doc.parsed_parts.push(part);
         }
         if let Some(part) = doc.package.related_part(&main, REL_NUMBERING) {
             let text = doc.package.read_text(&part)?;
-            doc.numbering = Numbering::parse(&part, &text.text, &theme)?;
+            let parsed = xml::parse(&part, &text.text)?;
+            doc.source_ids.read(&parsed);
+            doc.numbering = Numbering::from_root(&part, parsed.root_element(), &theme);
             doc.parsed_parts.push(part);
         }
 
@@ -246,11 +247,7 @@ impl Document {
                 story,
             );
             let root = importer.story(root_el, kind);
-            self.drawing_ids.extend(importer.drawing_ids);
-            let ids = parsed
-                .descendants()
-                .filter_map(|n| n.attribute((xml::W, "id"))?.trim().parse::<u32>().ok());
-            self.revision_ids = ids.fold(self.revision_ids, u32::max);
+            self.source_ids.read(&parsed);
             root
         };
         let made = first..self.nodes.len();

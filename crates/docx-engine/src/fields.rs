@@ -377,6 +377,11 @@ impl Document {
         }
         let mut next = self.n(text).parent;
         while let Some(id) = next {
+            if let Support::ReadOnly(reason) = self.n(id).support {
+                if reason != IN_FIELD && reason != IN_CONTENT_CONTROL {
+                    return Some(reason);
+                }
+            }
             if let NodeKind::ContentControl {
                 data_bound, lock, ..
             } = &self.n(id).kind

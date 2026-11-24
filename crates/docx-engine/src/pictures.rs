@@ -14,6 +14,7 @@ use crate::edit::check_text;
 use crate::error::EditError;
 use crate::export::NewRelationship;
 use crate::fnv1a;
+use crate::ids;
 use crate::ir::{DrawingInfo, MediaRef, NodeId, NodeKind, Placement};
 use crate::package::REL_IMAGE;
 use crate::xml::{escape_attr, A, R, WP};
@@ -223,8 +224,7 @@ impl Document {
         })
     }
 
-    /// `wanted` if no drawing in the document has it, else one above every
-    /// ID a drawing had. A supplied ID is reused only when it is available.
+    /// The requested ID when Word loads it and no drawing has it, else a free one.
     fn drawing_id(&self, wanted: Option<u32>) -> Option<u32> {
         let made = || {
             self.nodes
@@ -236,15 +236,16 @@ impl Document {
                 })
         };
         let free = |id: u32| {
-            id > 0
-                && !self.drawing_ids.contains(&id)
+            ids::DRAWING_IDS.contains(&id)
+                && !self.source_ids.drawings.contains(&id)
                 && !made().any(|(node, made)| made == id && self.attached(node).is_ok())
         };
         if let Some(id) = wanted.filter(|&id| free(id)) {
             return Some(id);
         }
-        let highest = self.drawing_ids.iter().copied().chain(made().map(|m| m.1));
-        highest.max().unwrap_or(0).checked_add(1)
+        let drawings = self.source_ids.drawings.iter().copied();
+        let used: BTreeSet<u32> = drawings.chain(made().map(|(_, id)| id)).collect();
+        ids::next_free(&used, ids::DRAWING_IDS)
     }
 
     /// The media of each picture a command made that is in a dirty story.

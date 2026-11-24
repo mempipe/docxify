@@ -663,7 +663,8 @@ impl Decision<'_> {
                     let NodeKind::Row(info) = doc.n(row.template).kind.clone() else {
                         unreachable!()
                     };
-                    doc.empty_row_like(row.template, info)
+                    doc.empty_row_like(table, row.template, info)
+                        .map_err(unbuilt)?
                 };
                 if !row.source {
                     shape.rows.insert(id, key.clone());
@@ -677,7 +678,7 @@ impl Decision<'_> {
                         for piece in &row.geometry {
                             let like = row.cells.get(&piece.id).copied().flatten();
                             let cell = match like {
-                                Some(like) => doc.empty_copy(like),
+                                Some(like) => doc.empty_cell_like(id, like).map_err(unbuilt)?,
                                 None => doc.bare_cell(id),
                             };
                             let continued = Some(decided.continued.contains(&piece.id));
@@ -753,11 +754,13 @@ impl Decision<'_> {
                         GridSlot::Cell(origin) => {
                             let model = row.cells.get(origin).copied().flatten();
                             let source = model.filter(|n| row.source && n.to_string() == *origin);
-                            let cell = source.unwrap_or_else(|| {
-                                model
-                                    .map(|n| doc.empty_copy(n))
-                                    .unwrap_or_else(|| doc.bare_cell(id))
-                            });
+                            let cell = match (source, model) {
+                                (Some(source), _) => source,
+                                (None, Some(model)) => {
+                                    doc.empty_cell_like(id, model).map_err(unbuilt)?
+                                }
+                                (None, None) => doc.bare_cell(id),
+                            };
                             let stated = row.merges.iter().any(|m| m.origin == *origin);
                             let continued =
                                 (!row.source || stated).then(|| decided.continued.contains(origin));

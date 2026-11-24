@@ -1,6 +1,4 @@
-//! Links: `SetLink`, which puts a range's content in `w:hyperlink` elements
-//! or takes it out, the `WrapInLink` and `UnwrapLink` steps it compiles
-//! into, and what export adds for the links commands make.
+//! Hyperlink elements, character styles and relationships for `SetLink`.
 //!
 //! A link a command makes to a URL names a relationship whose ID comes from
 //! the URL alone. Export adds the relationships that links in use name, so
@@ -133,19 +131,26 @@ impl Document {
     /// The character style links take. A document without one gets Word's,
     /// kept with the document and written while a run uses it. A document
     /// with no styles part gets none, and its links look like its text.
-    pub(crate) fn link_style(&mut self) -> Option<String> {
+    pub(crate) fn link_style(&mut self, base: &Document) -> Option<String> {
         if let Some(id) = self.existing_link_style() {
             return Some(id);
         }
         self.styles.part.as_ref()?;
-        let named: BTreeSet<&str> = self
-            .stories
+        // Reserve source references even while their paragraphs are being rebuilt.
+        let named: BTreeSet<&str> = base
+            .nodes
             .iter()
-            .flat_map(|s| self.descendants(s.root))
-            .filter_map(|id| match &self.n(id).kind {
+            .filter_map(|node| match &node.kind {
                 NodeKind::Run(info) => info.style.as_deref(),
+                NodeKind::Paragraph(info) => info.mark_run.as_ref()?.info.style.as_deref(),
                 _ => None,
             })
+            .chain(
+                base.styles
+                    .styles
+                    .values()
+                    .filter_map(|s| s.based_on.as_deref()),
+            )
             .collect();
         let id = (0..)
             .map(|n| match n {

@@ -275,6 +275,16 @@ fn paragraphs_resolve_defaults_styles_numbering_and_direct_formatting() {
 }
 
 #[test]
+fn an_undefined_paragraph_style_uses_the_default_paragraph_styles_run_formatting() {
+    let doc = Document::open(&generated("undefined-paragraph-style")).unwrap();
+    let run = |text| view(&doc, around(&doc, text, "run"))["effective"].clone();
+    let default = run("Unstyled paragraph.");
+    assert_eq!(default["color"], "C00000");
+    assert_eq!(default["size_half_points"], 72);
+    assert_eq!(run("Undefined style."), default);
+}
+
+#[test]
 fn runs_and_marks_resolve_theme_fonts_and_word_defaults() {
     let doc = Document::open(&generated("paragraph-layout")).unwrap();
     let run = |needle: &str| view(&doc, around(&doc, needle, "run"))["effective"].clone();
@@ -695,4 +705,118 @@ fn page_fields_tell_a_layout_which_field_and_what_number_to_draw() {
     }
     assert_eq!(page("simple")["number"], "page");
     assert_eq!(view(&doc, text_node(&doc, "simple"))["field"], "PAGE");
+}
+
+#[test]
+fn section_references_match_the_part_names_of_their_stories() {
+    let base = generated("header-footer");
+    let rels = "word/_rels/document.xml.rels";
+    let targets = part(&base, rels)
+        .replace("header1.xml", "Header1.xml")
+        .replace("footer1.xml", "Footer1.xml");
+    let doc = Document::open(&rewrite(&base, rels, Some(targets.as_bytes()))).unwrap();
+    let section = &every(&doc, "section")[0];
+    for (key, part) in [
+        ("headers", "word/header1.xml"),
+        ("footers", "word/footer1.xml"),
+    ] {
+        assert_eq!(section[key][0]["part"], part);
+    }
+}
+
+#[test]
+fn a_paragraph_reports_the_style_in_effect() {
+    let styled = |style: &str, text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let doc = Document::open(&with_body(&format!(
+        r#"<w:p><w:r><w:t>Inherited</w:t></w:r></w:p>{}{}{}"#,
+        styled("Normal", "Explicit"),
+        styled("Missing", "Undefined"),
+        styled("ListBullet", "Bullet"),
+    )))
+    .unwrap();
+    let style = |text| view(&doc, around(&doc, text, "paragraph"))["effective_style"].clone();
+    for text in ["Inherited", "Explicit", "Undefined"] {
+        assert_eq!(style(text), "Normal", "{text}");
+    }
+    assert_eq!(style("Bullet"), "ListBullet");
+}
+
+#[test]
+fn a_vertical_merge_takes_the_bottom_border_of_the_last_row_it_covers() {
+    let cell = |merge: &str, text: &str| {
+        let merge = match merge {
+            "" => String::new(),
+            merge => format!(r#"<w:vMerge w:val="{merge}"/>"#),
+        };
+        format!(
+            r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/>{merge}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"#
+        )
+    };
+    let borders = r#"<w:tblBorders><w:top w:val="single" w:sz="24"/><w:left w:val="single" w:sz="24"/><w:bottom w:val="single" w:sz="24"/><w:right w:val="single" w:sz="24"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders>"#;
+    // The first column merges rows one and two; the second merges rows two and three.
+    let rows = [
+        cell("restart", "Upper") + &cell("", "Alone"),
+        cell("continue", "") + &cell("restart", "Lower"),
+        cell("", "Last") + &cell("continue", ""),
+    ]
+    .map(|row| format!("<w:tr>{row}</w:tr>"))
+    .concat();
+    let doc = Document::open(&with_body(&format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/>{borders}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>{rows}</w:tbl><w:p/>"#
+    )))
+    .unwrap();
+    let (outer, inside) = (
+        json!({ "style": "single", "size_eighths": 24 }),
+        json!({ "style": "single", "size_eighths": 4 }),
+    );
+    let bottom = |text| view(&doc, around(&doc, text, "cell"))["borders"]["bottom"].clone();
+    assert_eq!(
+        bottom("Upper"),
+        inside,
+        "a merge that ends above the last row"
+    );
+    assert_eq!(bottom("Lower"), outer, "a merge that reaches the last row");
+    assert_eq!(bottom("Last"), outer);
+}
+
+#[test]
+fn a_vertical_merge_uses_the_stated_bottom_border_of_its_terminal_cell() {
+    let xml = r#"<w:tbl><w:tblPr><w:tblBorders><w:bottom w:val="single" w:sz="12"/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+        <w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/><w:tcBorders><w:bottom w:val="single" w:sz="4"/></w:tcBorders></w:tcPr><w:p><w:r><w:t>Head</w:t></w:r></w:p></w:tc></w:tr>
+        <w:tr>{terminal}</w:tr></w:tbl><w:p/>"#;
+    let continuation = |border| format!("<w:tc><w:tcPr><w:vMerge/>{border}</w:tcPr><w:p/></w:tc>");
+    for (terminal, bottom) in [
+        (
+            continuation(r#"<w:tcBorders><w:bottom w:val="single" w:sz="18"/></w:tcBorders>"#),
+            json!(18),
+        ),
+        (
+            continuation(r#"<w:tcBorders><w:bottom w:val="nil"/></w:tcBorders>"#),
+            Value::Null,
+        ),
+        (continuation(""), json!(12)),
+        (
+            format!(
+                "<w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt>",
+                continuation("")
+            ),
+            json!(4),
+        ),
+    ] {
+        let doc = Document::open(&with_body(&xml.replace("{terminal}", &terminal))).unwrap();
+        let cell = around(&doc, "Head", "cell");
+        let row = around(&doc, "Head", "row");
+        let table = around(&doc, "Head", "table");
+        for projection in [
+            view(&doc, cell),
+            view(&doc, row)["children"][0].clone(),
+            view(&doc, table)["children"][0]["children"][0].clone(),
+        ] {
+            assert_eq!(projection["borders"]["bottom"]["size_eighths"], bottom);
+        }
+    }
 }

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{EditError, ExportError};
 use crate::export::{Additions, DECLARATION};
 use crate::format::{rewrite, PPR_ORDER};
+use crate::ids;
 use crate::import::{Level, Numbering, Theme};
 use crate::ir::{NodeId, NodeKind, NumRef};
 use crate::xml::{self, W};
@@ -93,64 +94,28 @@ impl Document {
         self.added_lists.iter().map(|l| (l.num_id.as_str(), l.kind))
     }
 
-    /// Adds a list of `kind` as numbering instance `num_id`, as another
-    /// replica added it. Adding the same list again changes nothing; a
-    /// number the document already uses otherwise is refused.
-    pub fn add_list(&mut self, num_id: &str, kind: ListKind) -> Result<(), EditError> {
-        if let Some(added) = self.added_lists.iter().find(|l| l.num_id == num_id) {
-            if added.kind == kind {
-                return Ok(());
-            }
-            return Err(EditError::List {
-                num_id: num_id.to_string(),
-                reason: "is already a list of another kind",
-            });
-        }
-        if num_id.parse::<u32>().is_err() || num_id == "0" {
-            return Err(EditError::List {
-                num_id: num_id.to_string(),
-                reason: "is not a positive number",
-            });
-        }
-        if self.numbering.instances.contains_key(num_id) || self.numbering.num_ids.contains(num_id)
-        {
-            return Err(EditError::List {
-                num_id: num_id.to_string(),
-                reason: "is already a list in the document",
-            });
-        }
-        let key = abstract_key(num_id);
-        self.numbering.abstracts.insert(key.clone(), levels(kind));
-        self.numbering.instances.insert(num_id.to_string(), key);
-        self.added_lists.push(AddedList {
-            num_id: num_id.to_string(),
-            kind,
-        });
-        Ok(())
-    }
-
-    /// A new list of `kind`, numbered after every list the document has or
-    /// a paragraph or style names, so it gives no stray reference a
-    /// definition.
+    /// A new list of `kind`, with a number that no list the document has
+    /// takes and no paragraph or style names, so it gives no stray reference
+    /// a definition.
     pub(crate) fn new_list(&mut self, kind: ListKind) -> Result<String, EditError> {
-        let highest = self
-            .numbering
-            .num_ids
-            .iter()
-            .chain(self.numbering.instances.keys())
-            .map(String::as_str)
-            .chain(self.named_lists())
-            .filter_map(|id| id.parse::<u32>().ok())
-            .max()
-            .unwrap_or(0);
-        let num_id = highest
-            .checked_add(1)
+        let mut used = self.source_ids.lists.clone();
+        used.extend(
+            self.added_lists()
+                .filter_map(|(id, _)| id.parse::<u32>().ok()),
+        );
+        let num_id = ids::next_free(&used, 1..=ids::HIGHEST_NUMBER)
             .ok_or_else(|| EditError::List {
-                num_id: highest.to_string(),
+                num_id: ids::HIGHEST_NUMBER.to_string(),
                 reason: "no unused list number remains",
             })?
             .to_string();
-        self.add_list(&num_id, kind)?;
+        let key = abstract_key(&num_id);
+        self.numbering.abstracts.insert(key.clone(), levels(kind));
+        self.numbering.instances.insert(num_id.clone(), key);
+        self.added_lists.push(AddedList {
+            num_id: num_id.clone(),
+            kind,
+        });
         Ok(num_id)
     }
 
@@ -169,31 +134,51 @@ impl Document {
             .map(|n| n.num_id.as_str())
     }
 
-    /// What a paragraph's list markers are, when it is in a list whose
-    /// level the document defines.
-    pub(crate) fn list_kind(&self, paragraph: NodeId) -> Option<ListKind> {
-        let level = self.numbering.level(self.list_ref(paragraph)?)?;
-        Some(match level.format.as_str() {
-            "bullet" => ListKind::Bullet,
-            _ => ListKind::Number,
-        })
+    /// Continue a list of this kind in or beside the selection if it also
+    /// supplies that kind of marker at every level the selection will take.
+    pub(crate) fn continuing_list(&self, paragraphs: &[NodeId], kind: ListKind) -> Option<&NumRef> {
+        let levels: BTreeSet<_> = paragraphs
+            .iter()
+            .map(|&p| self.list_ref(p).map_or(0, |n| n.level))
+            .collect();
+        paragraphs
+            .iter()
+            .copied()
+            .chain(self.sibling_paragraph(*paragraphs.first()?, -1))
+            .chain(self.sibling_paragraph(*paragraphs.last()?, 1))
+            .filter_map(|p| self.list_ref(p))
+            .find(|num| {
+                let Some(definition) = self.numbering.levels(&num.num_id) else {
+                    return false;
+                };
+                let matches = |level| {
+                    definition.get(&level).is_some_and(|l| match kind {
+                        ListKind::Bullet => l.format == "bullet",
+                        ListKind::Number => l.format != "bullet",
+                    })
+                };
+                let deepest = self.deepest(&num.num_id);
+                matches(num.level) && levels.iter().all(|&level| matches(level.min(deepest)))
+            })
     }
 
     /// The highest level a list defines, or the highest `w:ilvl` can name
     /// when its definition is missing.
     pub(crate) fn deepest(&self, num_id: &str) -> u8 {
         self.numbering
-            .instances
-            .get(num_id)
-            .and_then(|a| self.numbering.abstracts.get(a))
-            .and_then(|levels| levels.keys().max().copied())
+            .levels(num_id)
+            .and_then(|levels| levels.keys().next_back().copied())
             .unwrap_or(MAX_LEVEL)
             .min(MAX_LEVEL)
     }
 
     /// The paragraph's `w:pPr` with its `w:numPr` set to `numbering`, or
     /// removed.
-    pub(crate) fn numbered(&self, paragraph: NodeId, numbering: Option<&NumRef>) -> String {
+    pub(crate) fn numbered(
+        &self,
+        paragraph: NodeId,
+        numbering: Option<&NumRef>,
+    ) -> Result<String, EditError> {
         let name = self.w_name(paragraph, "pPr");
         let set = numbering.map(|n| {
             let numpr = self.w_name(paragraph, "numPr");
@@ -205,7 +190,7 @@ impl Document {
                 n.level, n.num_id
             )]
         });
-        let current = self.properties(paragraph, "pPr");
+        let current = self.properties(paragraph, "pPr")?;
         rewrite(
             &current,
             &self.scope(paragraph),
@@ -214,9 +199,10 @@ impl Document {
             &NUMPR,
             set.unwrap_or_default(),
         )
+        .map_err(|e| e.on(paragraph))
     }
 
-    fn direct_numbering(&self, paragraph: NodeId) -> Option<&NumRef> {
+    pub(crate) fn direct_numbering(&self, paragraph: NodeId) -> Option<&NumRef> {
         match &self.n(paragraph).kind {
             NodeKind::Paragraph(info) => info.props.numbering.as_ref(),
             _ => None,
@@ -293,12 +279,18 @@ impl Document {
         if used.is_empty() {
             return Ok(());
         }
-        let first = self.numbering.highest_abstract_id.map_or(0, |n| n + 1);
+        let mut taken = self.source_ids.abstracts.clone();
+        let mut abstract_ids = Vec::new();
+        for _ in &used {
+            let id = ids::next_free(&taken, 0..=ids::HIGHEST_NUMBER)
+                .ok_or_else(|| ExportError::Zip("no list definition number remains".into()))?;
+            taken.insert(id);
+            abstract_ids.push(id);
+        }
         let definitions = |p: &str, declaration: &str| {
             let mut abstracts = String::new();
             let mut nums = String::new();
-            for (i, list) in used.iter().enumerate() {
-                let id = first + i as u32;
+            for (list, &id) in used.iter().zip(&abstract_ids) {
                 abstracts.push_str(&abstract_xml(p, declaration, id, list.kind));
                 nums.push_str(&num_xml(p, declaration, &list.num_id, id));
             }

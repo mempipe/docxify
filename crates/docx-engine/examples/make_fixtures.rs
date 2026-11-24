@@ -387,7 +387,7 @@ fn content_controls() -> String {
             r#"<w:alias w:val="Address"/><w:tag w:val="address"/><w:id w:val="106"/><w:text w:multiLine="1"/>"#,
             r#"<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>1 Old Street</w:t></w:r></w:p>"#,
         ),
-        format!("<w:p>{}{}</w:p>", run("Notes: "), sdt(r#"<w:alias w:val="Notes"/><w:id w:val="107"/>"#, &run("None yet"))),
+        format!("<w:p>{}{}</w:p>", run("Notes: "), sdt(r#"<w:alias w:val="Notes"/><w:id w:val="107"/>"#, "<w:r><w:t>West</w:t><w:tab/><w:t>Wing</w:t><w:br/></w:r>")),
         format!(
             "<w:p>{}{}</w:p>",
             run("Reference: "),
@@ -882,6 +882,13 @@ fn main() {
                 r#"<w:p><w:r><w:t xml:space="preserve">Plain then </w:t></w:r><w:r><w:rPr><w:rStyle w:val="Emphasis"/></w:rPr><w:t>emphasised</w:t></w:r><w:r><w:t>.</w:t></w:r></w:p>"#,
                 r#"<w:p><w:pPr><w:outlineLvl w:val="2"/></w:pPr><w:r><w:t>Direct outline level three</w:t></w:r></w:p>"#,
             )),
+        ),
+        (
+            "undefined-paragraph-style",
+            Fixture::new(format!("{}{}{SECT}",
+                p("Unstyled paragraph. These words wrap across several lines in the large default style."),
+                styled("Missing", "Undefined style. These words wrap across several lines in the large default style."),
+            )).with_styles(format!(r#"{DECL}<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:color w:val="C00000"/><w:sz w:val="72"/></w:rPr></w:style></w:styles>"#)),
         ),
         (
             "lists",

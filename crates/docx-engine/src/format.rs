@@ -1,14 +1,35 @@
 //! Run and paragraph properties are edited as markup so that unrelated
-//! properties retain their source bytes.
+//! properties retain their source bytes. The XML parser that import uses
+//! says where each property is and what namespace names it.
 
 use std::ops::Range;
 
 use crate::edit::{Format, Point};
 use crate::error::EditError;
 use crate::ir::{NodeId, NodeKind, ParaProps, RunInfo, RunProps};
+use crate::revisions::REVISION_ID;
 use crate::structure::refuse;
-use crate::xml::{escape_attr, W};
+use crate::xml::{self, escape_attr, w_local, W};
 use crate::Document;
+
+/// What the revision-ID placeholder is read as. XML cannot hold the
+/// placeholder, and this is as long, so what the parser finds is where it is
+/// in the markup that was given.
+const READ_REVISION_ID: &str = "000";
+const _: () = assert!(REVISION_ID.len_utf8() == READ_REVISION_ID.len());
+
+/// Properties the XML parser cannot read where they are.
+#[derive(Debug)]
+pub(crate) struct Unreadable;
+
+impl Unreadable {
+    pub(crate) fn on(self, node: NodeId) -> EditError {
+        EditError::Refused {
+            node,
+            reason: "the properties are not well-formed markup",
+        }
+    }
+}
 
 /// Namespace bindings for splicing OOXML property fragments. Values retain
 /// their XML quotes so a fragment can be parsed in the same scope.
@@ -53,33 +74,26 @@ impl Scope {
         self.0.get(prefix).map(|v| &v[1..v.len() - 1])
     }
 
-    pub(crate) fn declarations(&self) -> String {
-        self.0
-            .iter()
-            .map(|(prefix, value)| {
-                if prefix.is_empty() {
-                    format!(" xmlns={value}")
-                } else {
-                    format!(" xmlns:{prefix}={value}")
-                }
-            })
-            .collect()
-    }
-
     /// A qualified attribute, with a local declaration if no usable prefix is in scope.
     pub(crate) fn attribute(&self, ns: &str, preferred: &str, local: &str) -> String {
+        let (declaration, prefix) = self.attribute_prefix(ns, preferred);
+        format!("{declaration}{prefix}:{local}")
+    }
+
+    /// The declaration (including its trailing space) and prefix for attributes on a new element.
+    pub(crate) fn attribute_prefix(&self, ns: &str, preferred: &str) -> (String, String) {
         if let Some(prefix) = self
             .0
             .keys()
             .find(|p| !p.is_empty() && self.namespace(p) == Some(ns))
         {
-            return format!("{prefix}:{local}");
+            return (String::new(), prefix.clone());
         }
         let mut prefix = preferred.to_owned();
         while self.0.contains_key(&prefix) {
             prefix.push('_');
         }
-        format!("xmlns:{prefix}=\"{ns}\" {prefix}:{local}")
+        (format!("xmlns:{prefix}=\"{ns}\" "), prefix)
     }
 
     /// `element`, written where this scope applies, with a declaration for
@@ -111,33 +125,55 @@ impl Scope {
         format!("{}{missing}{}", &element[..end], &element[end..])
     }
 
-    pub(crate) fn local<'a>(&self, markup: &'a str) -> Option<&'a str> {
-        self.local_in(markup, W)
-    }
-
-    pub(crate) fn local_in<'a>(&self, markup: &'a str, ns: &str) -> Option<&'a str> {
-        let name = qname(markup);
-        let (prefix, local) = name.split_once(':').unwrap_or(("", name));
-        let tag = &markup[..tag_end(markup, 0)?];
-        let named = match tag.contains("xmlns") {
-            true => self.within(tag).namespace(prefix) == Some(ns),
-            false => self.namespace(prefix) == Some(ns),
+    /// Reads `markup`, one element where this scope applies, with the XML
+    /// parser that import uses. `rest` completes markup that stops before
+    /// its end tag, as a node's head does. `read` gets the element, and what
+    /// to take from a range the parser gives to index `markup`. The element
+    /// is read with the bindings its names can use, not all that are in
+    /// scope: a document's root declares dozens.
+    pub(crate) fn read<T>(
+        &self,
+        markup: &str,
+        rest: &str,
+        read: impl FnOnce(roxmltree::Node, usize) -> T,
+    ) -> Result<T, Unreadable> {
+        // A name can only use a prefix that the text spells before a colon.
+        let spelled = |prefix: &str| {
+            [markup, rest].iter().any(|text| {
+                text.match_indices(prefix)
+                    .any(|(at, _)| text.as_bytes().get(at + prefix.len()) == Some(&b':'))
+            })
         };
-        named.then_some(local)
-    }
-
-    pub(crate) fn is(&self, markup: &str, local: &str) -> bool {
-        self.local(markup) == Some(local)
-    }
-
-    /// Bind a detached copy even if its eventual parent changes the default
-    /// namespace or shadows a prefix inherited from the story.
-    pub(crate) fn detached_declarations(&self) -> String {
-        let mut bindings = self.declarations();
-        if !self.0.contains_key("") {
-            bindings.push_str(" xmlns=\"\"");
+        let mut wrapped = String::with_capacity(markup.len() + rest.len() + 256);
+        wrapped.push_str("<scope");
+        for (prefix, value) in self.0.iter() {
+            if prefix.is_empty() {
+                wrapped.push_str(" xmlns=");
+                wrapped.push_str(value);
+            } else if spelled(prefix) {
+                wrapped.push_str(" xmlns:");
+                wrapped.push_str(prefix);
+                wrapped.push('=');
+                wrapped.push_str(value);
+            }
         }
-        bindings
+        wrapped.push('>');
+        let offset = wrapped.len();
+        wrapped.push_str(markup);
+        wrapped.push_str(rest);
+        wrapped.push_str("</scope>");
+        // Copied revisions acquire their actual IDs at export, and no reader
+        // here consumes one.
+        if wrapped.contains(REVISION_ID) {
+            wrapped = wrapped.replace(REVISION_ID, READ_REVISION_ID);
+        }
+        let doc = xml::parse("properties", &wrapped).map_err(|_| Unreadable)?;
+        let mut roots = xml::elements(doc.root_element());
+        let root = roots.next().ok_or(Unreadable)?;
+        if roots.next().is_some() {
+            return Err(Unreadable);
+        }
+        Ok(read(root, offset))
     }
 }
 
@@ -274,8 +310,32 @@ impl Document {
             let node = self.n(id);
             let head = self.tags(self.story_text(node), node).0;
             scope.declare(&head[..tag_end(&head, 0).unwrap_or(head.len())]);
+            if id != chain[0] {
+                self.declare_content_scope(id, &mut scope);
+            }
         }
         scope
+    }
+
+    /// The namespace context of children. A control's XML content wrapper
+    /// is preserved in its head and tail but has no node in the editing tree.
+    pub(crate) fn content_scope(&self, id: NodeId) -> Scope {
+        let mut scope = self.scope(id);
+        self.declare_content_scope(id, &mut scope);
+        scope
+    }
+
+    fn declare_content_scope(&self, id: NodeId, scope: &mut Scope) {
+        let node = self.n(id);
+        if let NodeKind::ContentControl {
+            content_start: Some(start),
+            ..
+        } = node.kind
+        {
+            let text = self.story_text(node);
+            let end = tag_end(text, start).expect("parsed control content tag");
+            scope.declare(&text[start..end]);
+        }
     }
 
     /// Read a property fragment with the same parser and namespace bindings as
@@ -289,23 +349,9 @@ impl Document {
         if markup.is_empty() {
             return Ok(None);
         }
-        let mut wrapped = format!("<scope{}>{markup}</scope>", self.scope(id).declarations());
-        // Copied revisions acquire their actual IDs at export. Formatting
-        // readers need valid XML, and none of them consumes a revision ID.
-        if markup.contains(crate::revisions::REVISION_ID) {
-            wrapped = wrapped.replace(crate::revisions::REVISION_ID, "0");
-        }
-        let invalid = || EditError::Refused {
-            node: id,
-            reason: "the properties are not well-formed markup",
-        };
-        let doc = crate::xml::parse("properties", &wrapped).map_err(|_| invalid())?;
-        let mut roots = crate::xml::elements(doc.root_element());
-        let root = roots.next().ok_or_else(invalid)?;
-        if roots.next().is_some() {
-            return Err(invalid());
-        }
-        Ok(Some(read(root)))
+        let scope = self.scope(id);
+        let read = scope.read(markup, "", |root, _| read(root));
+        read.map(Some).map_err(|e| e.on(id))
     }
 
     pub(crate) fn run_properties_from(
@@ -338,7 +384,7 @@ impl Document {
             .unwrap_or_default())
     }
 
-    pub(crate) fn styled(&self, paragraph: NodeId, style: &str) -> String {
+    pub(crate) fn styled(&self, paragraph: NodeId, style: &str) -> Result<String, EditError> {
         let default = self.styles.default_paragraph_style().map(|s| s.id.as_str());
         let name = self.w_name(paragraph, "pPr");
         let set = (Some(style) != default).then(|| {
@@ -347,13 +393,14 @@ impl Document {
             vec![format!("<{element} {val}=\"{}\"/>", escape_attr(style))]
         });
         rewrite(
-            &self.properties(paragraph, "pPr"),
+            &self.properties(paragraph, "pPr")?,
             &self.scope(paragraph),
             &name,
             &PPR_ORDER,
             &STYLE,
             set.unwrap_or_default(),
         )
+        .map_err(|e| e.on(paragraph))
     }
 
     /// The paragraphs from the one holding `from` to the one holding `to`,
@@ -408,7 +455,7 @@ impl Document {
 
     /// The run's `w:rPr` with `change` applied. A property that its style
     /// already gives is removed rather than repeated, as Word does.
-    pub(crate) fn formatted(&self, run: NodeId, change: Format) -> String {
+    pub(crate) fn formatted(&self, run: NodeId, change: Format) -> Result<String, EditError> {
         let NodeKind::Run(info) = &self.n(run).kind else {
             unreachable!("a run");
         };
@@ -433,40 +480,44 @@ impl Document {
                 .collect()
         };
         let scope = &self.scope(run);
-        let mut rpr = self.properties(run, "rPr");
+        let mut rpr = self.properties(run, "rPr")?;
+        let mut set = |names: &[&str], set: Option<Vec<String>>| {
+            let set = set.unwrap_or_default();
+            rpr = rewrite(&rpr, scope, &name, &ORDER, names, set).map_err(|e| e.on(run))?;
+            Ok::<_, EditError>(())
+        };
         if let Some(on) = change.bold {
-            let set = (on != styled.bold.unwrap_or(false)).then(|| toggle(on, &BOLD));
-            rpr = rewrite(&rpr, scope, &name, &ORDER, &BOLD, set.unwrap_or_default());
+            set(
+                &BOLD,
+                (on != styled.bold.unwrap_or(false)).then(|| toggle(on, &BOLD)),
+            )?;
         }
         if let Some(on) = change.italic {
-            let set = (on != styled.italic.unwrap_or(false)).then(|| toggle(on, &ITALIC));
-            rpr = rewrite(&rpr, scope, &name, &ORDER, &ITALIC, set.unwrap_or_default());
+            set(
+                &ITALIC,
+                (on != styled.italic.unwrap_or(false)).then(|| toggle(on, &ITALIC)),
+            )?;
         }
         if let Some(on) = change.underline {
             let value = if on { "single" } else { "none" };
-            let set = (on != underlined(&styled))
-                .then(|| vec![format!("<{prefix}u {val}=\"{value}\"/>")]);
-            rpr = rewrite(
-                &rpr,
-                scope,
-                &name,
-                &ORDER,
+            set(
                 &UNDERLINE,
-                set.unwrap_or_default(),
-            );
+                (on != underlined(&styled))
+                    .then(|| vec![format!("<{prefix}u {val}=\"{value}\"/>")]),
+            )?;
         }
-        rpr
+        Ok(rpr)
     }
 
     /// The run's `w:rPr` with the character style `style`, or with none.
-    pub(crate) fn run_styled(&self, run: NodeId, style: Option<&str>) -> String {
+    pub(crate) fn run_styled(&self, run: NodeId, style: Option<&str>) -> Result<String, EditError> {
         let name = self.w_name(run, "rPr");
         let set = style.map(|style| {
             let element = self.w_name(run, "rStyle");
             let val = self.w_attr_name(run, "val");
             vec![format!("<{element} {val}=\"{}\"/>", escape_attr(style))]
         });
-        let current = self.properties(run, "rPr");
+        let current = self.properties(run, "rPr")?;
         rewrite(
             &current,
             &self.scope(run),
@@ -475,25 +526,57 @@ impl Document {
             &RUN_STYLE,
             set.unwrap_or_default(),
         )
+        .map_err(|e| e.on(run))
     }
 
     /// A node's properties element, `w:rPr` or `w:pPr`, as markup, or
     /// nothing.
-    pub(crate) fn properties(&self, id: NodeId, local: &str) -> String {
-        let head = self.head(id);
-        find_properties(&head, &self.scope(id), local)
-            .1
-            .map_or(String::new(), |range| head[range].to_string())
+    pub(crate) fn properties(&self, id: NodeId, local: &str) -> Result<String, EditError> {
+        let node = self.n(id);
+        let (head, tail) = self.tags(self.story_text(node), node);
+        let (_, found) =
+            find_properties(&head, &tail, &self.scope(id), local).map_err(|e| e.on(id))?;
+        Ok(found.map_or(String::new(), |range| head[range].to_string()))
+    }
+
+    /// A run's or hyperlink's start tag and run properties, without the
+    /// other markup before its first child.
+    pub(crate) fn bare_head(&self, id: NodeId) -> Result<String, EditError> {
+        let node = self.n(id);
+        let (head, tail) = self.tags(self.story_text(node), node);
+        let found = find_properties(&head, &tail, &self.scope(id), "rPr").map_err(|e| e.on(id))?;
+        Ok(match found {
+            (open, Some(properties)) => format!("{}{}", &head[..open], &head[properties]),
+            (open, None) => head[..open].to_string(),
+        })
+    }
+
+    /// The markup between a container's last child and its end tag.
+    pub(crate) fn trail(&self, id: NodeId) -> String {
+        let node = self.n(id);
+        let tail = self.tags(self.story_text(node), node).1;
+        tail[..tail.rfind("</").unwrap_or(0)].to_string()
+    }
+
+    /// Whether a run or hyperlink holds an XML comment or a processing
+    /// instruction before its first child, or more than whitespace after
+    /// its last. Parts of its content must not repeat or drop that markup.
+    pub(crate) fn has_edge_markup(&self, id: NodeId) -> bool {
+        let node = self.n(id);
+        let (head, tail) = self.tags(self.story_text(node), node);
+        head.contains("<!--")
+            || head.contains("<?")
+            || !tail[..tail.rfind("</").unwrap_or(0)].trim().is_empty()
     }
 
     /// A source node's properties element as its source has it, whatever
     /// commands changed since.
-    pub(crate) fn source_properties(&self, id: NodeId, local: &str) -> String {
+    pub(crate) fn source_properties(&self, id: NodeId, local: &str) -> Result<String, EditError> {
         let node = self.n(id);
-        let head = self.source_tags(self.story_text(node), node).0;
-        find_properties(&head, &self.scope(id), local)
-            .1
-            .map_or(String::new(), |range| head[range].to_string())
+        let (head, tail) = self.source_tags(self.story_text(node), node);
+        let (_, found) =
+            find_properties(&head, &tail, &self.scope(id), local).map_err(|e| e.on(id))?;
+        Ok(found.map_or(String::new(), |range| head[range].to_string()))
     }
 
     /// Writes final run properties while a builder is assembling a tree.
@@ -502,7 +585,7 @@ impl Document {
         &mut self,
         id: NodeId,
         properties: &str,
-    ) -> Result<String, EditError> {
+    ) -> Result<(), EditError> {
         let changeable: Vec<&str> = BOLD
             .iter()
             .chain(&ITALIC)
@@ -511,17 +594,17 @@ impl Document {
             .copied()
             .collect();
         let parsed = self.run_properties_from(id, properties)?;
-        let current = self.replace_properties(
+        self.replace_properties(
             id,
             "rPr",
             properties,
-            |scope, e| scope.local(e).is_some_and(|n| changeable.contains(&n)),
+            |e| w_local(e).is_some_and(|n| changeable.contains(&n)),
             "only bold, italic, underline and the character style can change this way",
         )?;
         if let NodeKind::Run(info) = &mut self.nodes[id.index()].kind {
             (info.style, info.props) = parsed;
         }
-        Ok(current)
+        Ok(())
     }
 
     /// Writes final paragraph properties before or after arrangement.
@@ -529,55 +612,53 @@ impl Document {
         &mut self,
         id: NodeId,
         properties: &str,
-    ) -> Result<String, EditError> {
+    ) -> Result<(), EditError> {
         let parsed = self.paragraph_properties_from(id, properties)?;
-        let current = self.replace_properties(
+        self.replace_properties(
             id,
             "pPr",
             properties,
-            |scope, e| scope.local(e).is_some_and(|n| PARAGRAPH.contains(&n)),
+            |e| w_local(e).is_some_and(|n| PARAGRAPH.contains(&n)),
             "only the paragraph style and numbering can change this way",
         )?;
         if let NodeKind::Paragraph(info) = &mut self.nodes[id.index()].kind {
             (info.style, info.props) = parsed;
         }
-        Ok(current)
+        Ok(())
     }
 
     /// Replaces a properties element if the remaining children match after
-    /// filtering the permitted changes in each child's namespace scope.
+    /// filtering the permitted changes, each read by its namespace.
     pub(crate) fn replace_properties(
         &mut self,
         id: NodeId,
         local: &str,
         properties: &str,
-        changeable: impl Fn(&Scope, &str) -> bool,
+        changeable: impl Fn(roxmltree::Node) -> bool,
         reason: &'static str,
-    ) -> Result<String, EditError> {
+    ) -> Result<(), EditError> {
         let scope = self.scope(id);
-        let head = self.head(id);
-        let (open, found) = find_properties(&head, &scope, local);
-        let current = found.clone().map_or("", |r| &head[r]).to_string();
-        let kept = |element: &str| -> Option<Vec<String>> {
+        let node = self.n(id);
+        let (head, tail) = self.tags(self.story_text(node), node);
+        let (open, found) = find_properties(&head, &tail, &scope, local).map_err(|e| e.on(id))?;
+        let current = found.clone().map_or("", |r| &head[r]);
+        let kept = |element: &str| -> Result<Option<Vec<String>>, EditError> {
             if element.is_empty() {
-                return Some(Vec::new());
+                return Ok(Some(Vec::new()));
             }
-            if !scope.is(element, local) {
-                return None;
-            }
-            let Some(inner) = inner(element) else {
-                return Some(Vec::new());
-            };
-            let scope = scope.within(&element[..inner.start]);
-            Some(
-                elements(&element[inner.clone()])
-                    .into_iter()
-                    .map(|r| element[inner.start + r.start..inner.start + r.end].to_string())
-                    .filter(|e| !changeable(&scope, e))
-                    .collect(),
-            )
+            let kept = scope.read(element, "", |props, offset| {
+                (w_local(props) == Some(local)).then(|| {
+                    xml::elements(props)
+                        .filter(|e| !changeable(*e))
+                        .map(|e| {
+                            element[e.range().start - offset..e.range().end - offset].to_string()
+                        })
+                        .collect()
+                })
+            });
+            kept.map_err(|e| e.on(id))
         };
-        match (kept(&current), kept(properties)) {
+        match (kept(current)?, kept(properties)?) {
             (Some(a), Some(b)) if a == b => {}
             _ => return refuse(id, reason),
         }
@@ -598,7 +679,7 @@ impl Document {
             }
         }
         self.mark_ancestors(id);
-        Ok(current)
+        Ok(())
     }
 }
 
@@ -617,75 +698,73 @@ pub(crate) fn rewrite(
     name: &str,
     order: &[&str],
     names: &[&str],
-    set: Vec<String>,
-) -> String {
-    // A properties element can shadow the prefix used to generate its new
-    // Word children. Bind those children before splicing them into its body.
+    mut set: Vec<String>,
+) -> Result<String, Unreadable> {
+    if element.is_empty() {
+        return Ok(match set.is_empty() {
+            true => String::new(),
+            false => format!("<{name}>{}</{name}>", set.concat()),
+        });
+    }
+    // A properties element can rebind names used by a new child or its attributes.
     let open = tag_end(element, 0).unwrap_or(0);
-    let inside = scope.within(&element[..open]);
-    let mut set = set;
     if element[..open].contains("xmlns") {
+        let inside = scope.within(&element[..open]);
         for child in &mut set {
-            if inside.local(child).is_none() && scope.local(child).is_some() {
-                *child = scope.carried_to(&inside, child);
+            *child = scope.carried_to(&inside, child);
+        }
+    }
+    scope.read(element, "", |props, offset| {
+        let Some(inner) = inner(element) else {
+            if set.is_empty() {
+                return element.to_string();
             }
-        }
-    }
-    let Some(inner) = inner(element).filter(|_| !element.is_empty()) else {
-        if set.is_empty() {
-            return element.to_string();
-        }
-        return match element.strip_suffix("/>") {
-            Some(start) => format!("{}>{}</{}>", start.trim_end(), set.concat(), qname(element)),
-            None => format!("<{name}>{}</{name}>", set.concat()),
+            let start = element.strip_suffix("/>").unwrap_or(element);
+            return format!("{}>{}</{}>", start.trim_end(), set.concat(), qname(element));
         };
-    };
-    let scope = &inside;
-    let body = &element[inner.clone()];
-    let children = elements(body);
-    let ours = |r: &Range<usize>| {
-        scope
-            .local(&body[r.clone()])
-            .is_some_and(|local| names.contains(&local))
-    };
-    let rank = order
-        .iter()
-        .position(|n| *n == names[0])
-        .expect("a known property");
-    // The first other child that the schema puts after this property.
-    let at = children
-        .iter()
-        .filter(|r| !ours(r))
-        .find(|r| match scope.local(&body[(*r).clone()]) {
-            Some(local) => order
-                .iter()
-                .position(|n| *n == local)
-                .is_none_or(|p| p > rank),
-            None => true,
-        })
-        .map_or(body.len(), |r| r.start);
-    let mut kept = String::with_capacity(body.len() + 32);
-    let mut last = 0;
-    let mut placed = false;
-    for r in children.iter().filter(|r| ours(r)) {
-        if !placed && at <= r.start {
-            kept.push_str(&body[last..at]);
-            kept.push_str(&set.concat());
-            (last, placed) = (at, true);
+        let children: Vec<(Range<usize>, Option<&str>)> = xml::elements(props)
+            .map(|c| (c.range().start - offset..c.range().end - offset, w_local(c)))
+            .collect();
+        let ours = |local: &Option<&str>| local.is_some_and(|local| names.contains(&local));
+        let rank = order
+            .iter()
+            .position(|n| *n == names[0])
+            .expect("a known property");
+        // The first other child that the schema puts after this property.
+        let at = children
+            .iter()
+            .filter(|(_, local)| !ours(local))
+            .find(|(_, local)| match local {
+                Some(local) => order
+                    .iter()
+                    .position(|n| n == local)
+                    .is_none_or(|p| p > rank),
+                None => true,
+            })
+            .map_or(inner.end, |(r, _)| r.start);
+        let mut kept = String::with_capacity(element.len() + 32);
+        let mut last = inner.start;
+        let mut placed = false;
+        for (r, _) in children.iter().filter(|(_, local)| ours(local)) {
+            if !placed && at <= r.start {
+                kept.push_str(&element[last..at]);
+                kept.push_str(&set.concat());
+                (last, placed) = (at, true);
+            }
+            kept.push_str(&element[last..r.start]);
+            last = r.end;
         }
-        kept.push_str(&body[last..r.start]);
-        last = r.end;
-    }
-    if !placed {
-        kept.push_str(&body[last..at]);
-        kept.push_str(&set.concat());
-        last = at;
-    }
-    kept.push_str(&body[last..]);
-    if kept.trim().is_empty() && bare(&element[..inner.start]) {
-        return String::new();
-    }
-    format!("{}{kept}{}", &element[..inner.start], &element[inner.end..])
+        if !placed {
+            kept.push_str(&element[last..at]);
+            kept.push_str(&set.concat());
+            last = at;
+        }
+        kept.push_str(&element[last..inner.end]);
+        if kept.trim().is_empty() && bare(&element[..inner.start]) {
+            return String::new();
+        }
+        format!("{}{kept}{}", &element[..inner.start], &element[inner.end..])
+    })
 }
 
 /// Whether a start tag holds only its name.
@@ -700,33 +779,39 @@ fn bare(tag: &str) -> bool {
 /// depth, whose local names are in `locals`. `scope` is the scope the
 /// element is in. An element that loses everything it held is dropped; one
 /// written with no children stays as it is.
-pub(crate) fn without(element: &str, scope: &Scope, locals: &[&str]) -> String {
-    let Some(inner) = inner(element).filter(|_| !element.is_empty()) else {
+pub(crate) fn without(element: &str, scope: &Scope, locals: &[&str]) -> Result<String, Unreadable> {
+    if element.is_empty() {
+        return Ok(String::new());
+    }
+    scope.read(element, "", |props, offset| {
+        stripped(element, props, offset, locals)
+    })
+}
+
+/// `node` of `markup`, as [`without`] leaves it.
+fn stripped(markup: &str, node: roxmltree::Node, offset: usize, locals: &[&str]) -> String {
+    let element = &markup[node.range().start - offset..node.range().end - offset];
+    let start = node.range().start - offset;
+    let Some(inner) = inner(element) else {
         return element.to_string();
     };
-    let body = &element[inner.clone()];
-    let children = elements(body);
-    if children.is_empty() {
+    let mut children = xml::elements(node).peekable();
+    if children.peek().is_none() {
         return element.to_string();
     }
-    let scope = &scope.within(&element[..inner.start]);
-    let mut kept = String::with_capacity(body.len());
-    let mut last = 0;
+    let mut kept = String::with_capacity(element.len());
+    let mut last = start + inner.start;
     let mut any = false;
-    for r in children {
-        kept.push_str(&body[last..r.start]);
-        last = r.end;
-        let child = &body[r];
-        if scope
-            .local(child)
-            .is_some_and(|local| locals.contains(&local))
-        {
+    for child in children {
+        kept.push_str(&markup[last..child.range().start - offset]);
+        last = child.range().end - offset;
+        if w_local(child).is_some_and(|local| locals.contains(&local)) {
             continue;
         }
         any = true;
-        kept.push_str(&without(child, scope, locals));
+        kept.push_str(&stripped(markup, child, offset, locals));
     }
-    kept.push_str(&body[last..]);
+    kept.push_str(&markup[last..start + inner.end]);
     if !any && kept.trim().is_empty() {
         return String::new();
     }
@@ -734,14 +819,25 @@ pub(crate) fn without(element: &str, scope: &Scope, locals: &[&str]) -> String {
 }
 
 /// Where a node's start tag ends in its head, and where its WordprocessingML
-/// properties element `local` is. `scope` is the scope inside the node.
-fn find_properties(head: &str, scope: &Scope, local: &str) -> (usize, Option<Range<usize>>) {
+/// properties element `local` is. `tail` is what follows the node's
+/// children, and `scope` the scope inside the node.
+fn find_properties(
+    head: &str,
+    tail: &str,
+    scope: &Scope,
+    local: &str,
+) -> Result<(usize, Option<Range<usize>>), Unreadable> {
     let open = tag_end(head, 0).unwrap_or(head.len());
-    let found = elements(&head[open..])
-        .into_iter()
-        .find(|r| scope.is(&head[open + r.start..open + r.end], local))
-        .map(|r| open + r.start..open + r.end);
-    (open, found)
+    // A head that is only a start tag holds no properties.
+    if !head[open..].contains('<') {
+        return Ok((open, None));
+    }
+    scope.read(head, tail, |node, offset| {
+        let found = xml::elements(node)
+            .map(|c| (c.range().start - offset..c.range().end - offset, w_local(c)))
+            .find(|(range, name)| *name == Some(local) && range.end <= head.len());
+        (open, found.map(|(range, _)| range))
+    })
 }
 
 /// The content between an element's start and end tags, or `None` when it
@@ -771,52 +867,20 @@ pub(crate) fn tag_end(text: &str, start: usize) -> Option<usize> {
     None
 }
 
-/// The top-level elements in a stretch of markup.
-pub(crate) fn elements(body: &str) -> Vec<Range<usize>> {
-    let mut out = Vec::new();
-    let (mut depth, mut start, mut at) = (0usize, 0, 0);
-    while let Some(found) = body[at..].find('<') {
-        let i = at + found;
-        if body[i..].starts_with("<!--") {
-            at = body[i..].find("-->").map_or(body.len(), |e| i + e + 3);
-            continue;
-        }
-        if body[i..].starts_with("<?") {
-            at = body[i..].find("?>").map_or(body.len(), |e| i + e + 2);
-            continue;
-        }
-        let Some(end) = tag_end(body, i) else {
-            break;
-        };
-        if body[i..].starts_with("</") {
-            depth = depth.saturating_sub(1);
-            if depth == 0 {
-                out.push(start..end);
-            }
-        } else if body[..end].ends_with("/>") {
-            if depth == 0 {
-                out.push(i..end);
-            }
-        } else {
-            if depth == 0 {
-                start = i;
-            }
-            depth += 1;
-        }
-        at = end;
-    }
-    out
-}
-
 /// The markup of the first WordprocessingML child `local`. `scope` is the
 /// scope `element` is in.
-pub(crate) fn child<'a>(element: &'a str, scope: &Scope, local: &str) -> Option<&'a str> {
-    let inner = inner(element).filter(|_| !element.is_empty())?;
-    let scope = scope.within(&element[..inner.start]);
-    elements(&element[inner.clone()])
-        .into_iter()
-        .map(|r| &element[inner.start + r.start..inner.start + r.end])
-        .find(|e| scope.is(e, local))
+pub(crate) fn child<'a>(
+    element: &'a str,
+    scope: &Scope,
+    local: &str,
+) -> Result<Option<&'a str>, Unreadable> {
+    if element.is_empty() {
+        return Ok(None);
+    }
+    let found = scope.read(element, "", |props, offset| {
+        xml::child(props, W, local).map(|c| c.range().start - offset..c.range().end - offset)
+    })?;
+    Ok(found.map(|range| &element[range]))
 }
 
 /// An element's qualified name as its markup spells it.
@@ -859,4 +923,40 @@ pub(crate) fn add_attribute(element: &str, name: &str, value: &str) -> String {
         false => open - 1,
     };
     format!("{} {name}=\"{value}\"{}", &element[..end], &element[end..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_property_after_a_revision_placeholder_is_found_where_it_is() {
+        let scope = Scope::default().within(&format!(r#"<w:p xmlns:w="{W}">"#));
+        let mark = format!(r#"<w:rPr><w:ins w:id="{REVISION_ID}" w:author="A"/></w:rPr>"#);
+        let properties = format!(r#"<w:pPr>{mark}<w:keepNext/><w:jc w:val="center"/></w:pPr>"#);
+
+        let without_keep = rewrite(
+            &properties,
+            &scope,
+            "w:pPr",
+            &PPR_ORDER,
+            &["keepNext"],
+            vec![],
+        );
+        assert_eq!(
+            without_keep.unwrap(),
+            format!(r#"<w:pPr>{mark}<w:jc w:val="center"/></w:pPr>"#)
+        );
+        let aligned = without(&properties, &scope, &["jc"]).unwrap();
+        assert_eq!(aligned, format!("<w:pPr>{mark}<w:keepNext/></w:pPr>"));
+        assert_eq!(child(&properties, &scope, "rPr").unwrap(), Some(&*mark));
+
+        // A node's head stops before its children, and its tail closes it.
+        let head = format!(r#"<w:ins w:id="{REVISION_ID}"><w:rPr><w:b/></w:rPr>"#);
+        let found = find_properties(&head, "</w:ins>", &scope, "rPr").unwrap();
+        assert_eq!(
+            found.1.map(|range| &head[range]),
+            Some("<w:rPr><w:b/></w:rPr>")
+        );
+    }
 }

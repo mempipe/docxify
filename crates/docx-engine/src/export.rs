@@ -8,7 +8,7 @@
 //! nodes a command created are generated.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{Cursor, Write};
 use std::sync::Arc;
 
@@ -17,6 +17,7 @@ use zip::{CompressionMethod, ZipWriter};
 
 use crate::error::ExportError;
 use crate::format::tag_end;
+use crate::ids;
 use crate::ir::{Node, NodeId, NodeKind};
 use crate::pictures::AddedMedia;
 use crate::revisions::REVISION_ID;
@@ -297,7 +298,8 @@ impl Document {
             }
         }
         // Word gives comments and revisions IDs from one sequence.
-        let mut revision = self.revision_ids.max(self.made_comment_ids());
+        let mut marks = self.source_ids.marks.clone();
+        marks.extend(self.made_comment_ids());
 
         let mut archive = self
             .package
@@ -316,7 +318,7 @@ impl Document {
                     }
                     drop(entry);
                     writer.start_file(name, options)?;
-                    let text = number_revisions(self.serialize_story(story), &mut revision);
+                    let text = number_revisions(self.serialize_story(story), &mut marks)?;
                     writer.write_all(text.as_bytes())?;
                 }
                 None => match additions.replaced.remove(&name.to_ascii_lowercase()) {
@@ -525,21 +527,23 @@ impl Document {
     }
 }
 
-/// A story's markup with each revision ID a command left for export
-/// numbered, from one above `last`, which ends as the last one given.
-fn number_revisions(text: String, last: &mut u32) -> String {
+/// A story's markup with each revision ID a command left for export given
+/// a number that is not in `used`, which then holds it.
+fn number_revisions(text: String, used: &mut BTreeSet<u32>) -> Result<String, ExportError> {
     if !text.contains(REVISION_ID) {
-        return text;
+        return Ok(text);
     }
     let mut out = String::with_capacity(text.len() + 64);
     for (i, piece) in text.split(REVISION_ID).enumerate() {
         if i > 0 {
-            *last += 1;
-            out.push_str(&last.to_string());
+            let id = ids::next_free(used, 1..=ids::HIGHEST_NUMBER)
+                .ok_or_else(|| ExportError::Zip("no revision ID remains".into()))?;
+            used.insert(id);
+            out.push_str(&id.to_string());
         }
         out.push_str(piece);
     }
-    out
+    Ok(out)
 }
 
 /// The relationships part of `part`.

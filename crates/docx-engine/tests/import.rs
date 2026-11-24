@@ -33,6 +33,37 @@ fn simple_paragraphs_are_blocks_with_runs_and_text() {
 }
 
 #[test]
+fn inspecting_a_subtree_matches_its_view_in_the_full_document() {
+    for (name, bytes) in all_fixtures() {
+        let doc = Document::open(&bytes).unwrap();
+        let inspection = doc.inspect();
+        let mut pending: Vec<_> = inspection.stories.iter().collect();
+        while let Some(expected) = pending.pop() {
+            let id = expected.id;
+            let actual = doc.inspect_node(id).unwrap();
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap(),
+                "{name}: node {id}"
+            );
+            // Start partway through as well as at the first child, so an open
+            // comment or an earlier list item must be accounted for.
+            for start in 0..=expected.children.len().min(1) {
+                let children = doc
+                    .inspect_children(id, start..expected.children.len())
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(children).unwrap(),
+                    serde_json::to_value(&expected.children[start..]).unwrap(),
+                    "{name}: children of {id} from {start}"
+                );
+            }
+            pending.extend(&expected.children);
+        }
+    }
+}
+
+#[test]
 fn ids_are_deterministic_for_the_same_bytes() {
     for (name, bytes) in all_fixtures() {
         let a = Document::open(&bytes).unwrap().inspect_json();
@@ -355,6 +386,21 @@ fn complex_fields_spanning_paragraphs_are_read_only() {
         sections, 1,
         "the landscape section break inside a paragraph"
     );
+}
+
+#[test]
+fn widow_control_defaults_on_and_honors_the_paragraph_setting() {
+    let bytes = with_body(
+        r#"<w:p/><w:p><w:pPr><w:widowControl/></w:pPr></w:p>
+        <w:p><w:pPr><w:widowControl w:val="0"/></w:pPr></w:p>"#,
+    );
+    let doc = Document::open(&bytes).unwrap();
+    let settings: Vec<_> = doc
+        .paragraphs()
+        .into_iter()
+        .map(|p| doc.effective_paragraph(p).widow_control)
+        .collect();
+    assert_eq!(settings, [true, true, false]);
 }
 
 #[test]

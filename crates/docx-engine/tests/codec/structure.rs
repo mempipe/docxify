@@ -747,6 +747,36 @@ fn replace_range(from: Point, to: Point, text: &str) -> Command {
 }
 
 #[test]
+fn headless_undo_and_redo_restore_each_intermediate_package() {
+    let mut doc = EditingDocument::open(&generated("simple-paragraphs")).unwrap();
+    let mut history = vec![entries(&doc.export().unwrap())];
+    for (needle, start, end, replacement) in [
+        ("First", 0, 5, "One"),
+        ("Second", 3, 3, "\n"),
+        ("Third", 0, 5, ""),
+    ] {
+        let node = text_node(&doc, needle);
+        edit(
+            &mut doc,
+            replace_range(at(node, start), at(node, end), replacement),
+        );
+        let parts = entries(&doc.export().unwrap());
+        assert_ne!(history.last(), Some(&parts));
+        history.push(parts);
+    }
+    for expected in history[..history.len() - 1].iter().rev() {
+        assert!(doc.0.undo());
+        assert_eq!(&entries(&doc.export().unwrap()), expected);
+    }
+    assert!(!doc.0.undo());
+    for expected in &history[1..] {
+        assert!(doc.0.redo());
+        assert_eq!(&entries(&doc.export().unwrap()), expected);
+    }
+    assert!(!doc.0.redo());
+}
+
+#[test]
 fn replace_range_deletes_across_paragraphs_and_undo_restores_them() {
     let bytes = generated("simple-paragraphs");
     let mut doc = EditingDocument::open(&bytes).unwrap();
@@ -854,6 +884,19 @@ fn replace_range_refuses_what_it_cannot_carry_and_changes_nothing() {
     let bytes = generated("complex-mixed");
     let mut doc = EditingDocument::open(&bytes).unwrap();
     let original = stories(&doc);
+    let blocks = &doc.stories().next().unwrap().children;
+    let whole_story = replace_range(
+        Point::Before { before: blocks[0] },
+        Point::After {
+            after: *blocks.last().unwrap(),
+        },
+        "Replacement",
+    );
+    assert!(doc
+        .run(whole_story)
+        .unwrap_err()
+        .to_string()
+        .contains("ends of the selection inside paragraphs"));
     let heading = find(
         &doc,
         |k| matches!(k, NodeKind::Text { text } if text == "Chapter one"),
@@ -1022,6 +1065,34 @@ fn a_run_moved_by_a_split_or_a_join_keeps_the_namespace_its_paragraph_declared()
 }
 
 #[test]
+fn joined_runs_and_hyperlinks_keep_their_source_namespace_in_the_destination() {
+    let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let bytes = with_body(&format!(
+        r#"<a:p xmlns:a="{w}" xmlns:w="urn:extension"><a:r><a:t>A</a:t></a:r></a:p><w:p xmlns:q="{w}"><w:r><w:t>B</w:t></w:r><q:hyperlink w:anchor="chapter"><w:r><w:t>C</w:t></w:r></q:hyperlink></w:p>"#
+    ));
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let first = paragraph_with(&doc, "A");
+    edit(&mut doc, Command::MergeParagraphs { paragraph: first });
+    let check = |reopened: &Document| {
+        let link = find(
+            reopened,
+            |kind| matches!(kind, NodeKind::Hyperlink(info) if info.anchor.as_deref() == Some("chapter")),
+        );
+        assert!(reopened
+            .descendants(link)
+            .contains(&text_node(reopened, "C")));
+    };
+    let joined = reopen("join across conflicting namespaces", &doc);
+    assert_eq!(texts(&joined), ["ABC"]);
+    check(&joined);
+    let split = at(text_node(&doc, "B"), 0);
+    edit(&mut doc, Command::SplitParagraph { at: split });
+    let reopened = reopen("split after joining", &doc);
+    assert_eq!(texts(&reopened), ["A", "BC"]);
+    check(&reopened);
+}
+
+#[test]
 fn embedded_xml_in_text_keeps_all_characters_and_its_source_markup() {
     let bytes = generated("simple-paragraphs");
     let mixed = "<w:t>First<!--keep-->&amp;<?word keep?><![CDATA[ more]]></w:t>";
@@ -1057,4 +1128,41 @@ fn embedded_xml_in_text_keeps_all_characters_and_its_source_markup() {
     );
     assert_eq!(doc.text(p).unwrap(), "X nextX");
     assert!(!part(&doc.export().unwrap(), "word/document.xml").contains("<!--keep-->"));
+}
+
+#[test]
+fn deleting_a_table_respects_control_locks_at_every_depth() {
+    for (lock, may_remove) in [
+        ("sdtLocked", false),
+        ("sdtContentLocked", false),
+        ("contentLocked", true),
+        ("unlocked", true),
+    ] {
+        let wrap = |inner: &str| {
+            format!(
+                r#"<w:sdt><w:sdtPr><w:lock w:val="{lock}"/></w:sdtPr><w:sdtContent>{inner}</w:sdtContent></w:sdt>"#
+            )
+        };
+        for row in [
+            format!("<w:tr><w:tc>{}</w:tc></w:tr>", wrap("<w:p/>")),
+            format!("<w:tr>{}</w:tr>", wrap("<w:tc><w:p/></w:tc>")),
+            wrap("<w:tr><w:tc><w:p/></w:tc></w:tr>"),
+        ] {
+            let bytes = with_body(&format!("<w:tbl>{row}</w:tbl><w:p/>"));
+            let mut doc = EditingDocument::open(&bytes).unwrap();
+            let table = find(&doc, |k| matches!(k, NodeKind::Table(_)));
+            let result = doc.run(Command::RemoveNode { node: table });
+            if may_remove {
+                result.unwrap();
+                assert!(!part(&doc.export().unwrap(), "word/document.xml").contains("<w:tbl>"));
+            } else {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("locked against deletion"));
+                assert!(!doc.0.undo());
+                assert_eq!(doc.export().unwrap(), bytes);
+            }
+        }
+    }
 }

@@ -19,7 +19,8 @@ Proposed: awaiting operator approval.
 
 - **The original package stays in memory, and the document model points into it.** That is the compressed ZIP and the decoded text of each part the engine parses.
 - **Every node is editable, read-only or opaque.** An opaque node keeps its source bytes and is written back unchanged. So are unknown attributes and whitespace inside an edited parent.
-- **Export splices.** An untouched subtree is copied from the source bytes. Only changed elements are written anew. An edited source run stays that run, so the markup around its children is kept. Content that moves to another paragraph declares the namespaces its source paragraph declared for it. When an edit rewrites a table whose properties follow a range marker, the table head emits those properties before the marker. An untouched table keeps its original order.
+- **Export splices.** An untouched subtree is copied from the source bytes. Only changed elements are written anew. An edited source run stays that run, so the markup around its children is kept. When the content of a run or link is written as several parts, the first part keeps the markup before its first child and the last part the markup after its last child. Content that moves to another paragraph declares the namespaces its source paragraph declared for it. When an edit rewrites a table whose properties follow a range marker, the table head emits those properties before the marker, each after the markup that led to it. An untouched table keeps its original order.
+- **A property edit reads markup as import does.** The XML parser that import uses says where each property is and which namespace names it. The edit splices at the byte ranges the parser gives. Markup the parser rejects refuses the command.
 - **No command adds or removes a relationship, a part or a content type.** Export derives the package additions from visible content. Callers can run `validate_package` on the exported bytes to check package references.
 - **Strict OOXML and packages that are not Word documents are refused at open.**
 - **Source nodes receive IDs in import order,** so the same bytes give the same source IDs. Projected nodes belong to a single view. A rebuild can reuse slots from nodes the view discarded.
@@ -51,12 +52,12 @@ Proposed: awaiting operator approval.
 
 Proposed: awaiting operator approval.
 
-The source is the prototype at revision `9bdec8d1000e0133a3b551b16024fbb9a2f25961`.
+The source is the prototype at revision `f64cc0e115fb79b3cfaf4850b7572ea457369b34`.
 
 | Here | Git tree hash |
 | --- | --- |
-| `crates/docx-engine` | `a7ee2cf39cf733893ad2fc9ad33594acb120457a` |
-| `fixtures` | `1558e3144c12efe28713466b4564bf33d53b9863` |
+| `crates/docx-engine` | `0ac557171c0730d9ab6ea04dbccf1a62b6e8b59d` |
+| `fixtures` | `4c4153813adfc342f367567b53026d6431cb3d1d` |
 
 A git tree hash covers the bytes, name and mode of every file below a directory. The prototype's two directories have these hashes at that revision. To check this repository's side:
 
@@ -64,7 +65,7 @@ A git tree hash covers the bytes, name and mode of every file below a directory.
 git rev-parse HEAD:crates/docx-engine HEAD:fixtures
 ```
 
-The hashes change as soon as a moved file is edited here, so they describe the commit that moved the files.
+The hashes change as soon as a moved file is edited here, so they describe the commit that last copied the files.
 
 One link is left broken to keep the bytes. `fixtures/real-world/README.md` points at a "Real-world corpus" section of the prototype's README, which has not moved.
 
@@ -82,7 +83,7 @@ Proposed: awaiting operator approval.
 
 Proposed: awaiting operator approval.
 
-- **`test` runs `cargo test --release`.** The crate's 216 tests ran in 12 s in release and 113 s in debug, with the binaries already built. Both were measured on a heavily loaded machine, so the ratio is the finding. Release is also the profile the prototype's own check uses.
+- **`test` runs `cargo test --release`.** At the D4 revision the crate's 258 tests ran in 3.9 s in release and 41 s in debug, with the binaries already built. Each was timed once on a machine doing other work, so the ratio is the finding. Release is also the profile the prototype's own check uses.
 - **`lint` runs Clippy with `--all-features`.** The crate has an optional `schema` feature and an example that requires it. Without the flag neither is compiled by any task.
 
 The cost of release is that debug assertions and overflow checks are off while the tests run.

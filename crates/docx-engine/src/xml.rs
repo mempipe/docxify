@@ -6,7 +6,9 @@ use crate::error::OpenError;
 
 pub const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 pub const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+pub const MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 pub const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+pub const W15: &str = "http://schemas.microsoft.com/office/word/2012/wordml";
 pub const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 pub const WP: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
 pub const PKG_RELS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
@@ -58,6 +60,12 @@ pub fn parse<'a>(part: &str, text: &'a str) -> Result<roxmltree::Document<'a>, O
 
 pub fn is(node: Node, ns: &str, local: &str) -> bool {
     node.is_element() && node.tag_name().namespace() == Some(ns) && node.tag_name().name() == local
+}
+
+/// The local name of a WordprocessingML element.
+pub fn w_local<'i>(node: Node<'_, 'i>) -> Option<&'i str> {
+    let tag = node.tag_name();
+    (node.is_element() && tag.namespace() == Some(W)).then(|| tag.name())
 }
 
 pub fn child<'a, 'i>(node: Node<'a, 'i>, ns: &str, local: &str) -> Option<Node<'a, 'i>> {

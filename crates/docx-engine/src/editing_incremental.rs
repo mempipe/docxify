@@ -129,10 +129,7 @@ fn restructure(
             && p.paragraph.text.iter().all(|inline| match inline {
                 Inline::Char(c) => c.basis.is_none_or(based) && c.source_text.is_none_or(within),
                 Inline::Source { node, basis, .. } => within(*node) && within(*basis),
-                // A picture's drawing ID is chosen against the whole document.
-                Inline::Object { object, basis, .. } => {
-                    matches!(object.kind, NewInline::Break) && basis.is_none_or(based)
-                }
+                Inline::Object { basis, .. } => basis.is_none_or(based),
                 Inline::HiddenBoundary => false,
             })
     };
@@ -274,6 +271,9 @@ fn restructure(
         })
         .collect();
     let mut inlines = inlines::InlineWriter::new(base, &seeded, &located, owners);
+    if !inlines.reuse_pictures(&previous.document, old_nodes, before, &located) {
+        return Ok(false);
+    }
     let mut kept: HashMap<_, _> = before
         .iter()
         .zip(old_nodes)
@@ -286,7 +286,7 @@ fn restructure(
         })
         .collect();
     let mut blocks = Vec::new();
-    for (i, p) in located.iter().enumerate() {
+    for p in &located {
         let node = match &p.paragraph.mark {
             Mark::Base(id) => *id,
             Mark::Made { identity, like } => view
@@ -298,13 +298,23 @@ fn restructure(
             Mark::Cell { key, .. } => {
                 let node = shape.cells[key].0;
                 view.document.restore_made(&shape.cell_paragraphs[&node]);
-                if let Some(basis) = stated_cell_basis(&view.state, key)? {
-                    write_cell_basis(&mut view.document, node, &basis, &list_numbers)?;
-                }
                 node
             }
             Mark::Lost => unreachable!("only owned paragraph marks were admitted"),
         };
+        blocks.push(node);
+    }
+    children.splice(at..at + old_nodes.len(), blocks.iter().copied());
+    view.document.arrange(parent, &children).map_err(unbuilt)?;
+    for id in kept.into_values() {
+        view.document.nodes.release(id);
+    }
+    for (i, (p, &node)) in located.iter().zip(&blocks).enumerate() {
+        if let Mark::Cell { key, .. } = &p.paragraph.mark {
+            if let Some(basis) = stated_cell_basis(&view.state, key)? {
+                write_cell_basis(&mut view.document, node, &basis, &list_numbers)?;
+            }
+        }
         write_paragraph(
             &mut inlines,
             &mut inlines::Target {
@@ -313,20 +323,11 @@ fn restructure(
                 comments: &view.comments,
             },
             &list_numbers,
-            (parent, node),
+            node,
             p,
             Some(&new_units[p.first - start - 1]),
             located.get(i + 1).map(|p| &p.paragraph),
         )?;
-        blocks.push(node);
-    }
-    children.splice(at..at + old_nodes.len(), blocks.iter().copied());
-    view.document.arrange(parent, &children).map_err(unbuilt)?;
-    for id in kept.into_values() {
-        view.document.nodes.release(id);
-    }
-    for (run, format) in inlines.formats {
-        view.document.format_run(run, format).map_err(unbuilt)?;
     }
     listed = listed || blocks.iter().any(|p| view.document.list_ref(*p).is_some());
     let list_order_changed = listed

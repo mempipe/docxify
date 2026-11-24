@@ -108,6 +108,11 @@ fn deletion_of(unit: &Unit) -> Result<Option<Track>, SessionError> {
     }
     Ok(None)
 }
+/// A deletion the file records. The writer keeps it whole, so deleting it
+/// again has nothing to mark.
+fn recorded_deletion(kind: &NodeKind) -> bool {
+    matches!(kind, NodeKind::Revision(revision) if revision.change == "del")
+}
 /// What starts a paragraph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mark {
@@ -183,6 +188,19 @@ pub enum Inline {
     },
 }
 impl Inline {
+    /// An imported paragraph child is written whole, even beside a character
+    /// that inherits formatting from the same paragraph.
+    fn paragraph_child(&self, base: &Document) -> Option<NodeId> {
+        match self {
+            Self::Source { node, basis, .. }
+                if matches!(base.node(*basis)?.kind, NodeKind::Paragraph(_)) =>
+            {
+                Some(*node)
+            }
+            _ => None,
+        }
+    }
+
     fn basis(&self) -> Option<NodeId> {
         match self {
             Self::HiddenBoundary => None,
@@ -800,7 +818,7 @@ impl View {
             Point::End { end } => (places.runs.get(end).or(places.paragraphs.get(end)))
                 .map(|(first, len)| first + len),
         };
-        found.ok_or("names a place this path does not hold")
+        found.ok_or("needs a position in editable content. Place the caret or both ends of the selection inside paragraphs")
     }
 
     fn selected_ranges(
@@ -1019,7 +1037,7 @@ fn write_paragraph(
     inlines: &mut inlines::InlineWriter,
     target: &mut inlines::Target,
     list_numbers: &HashMap<String, String>,
-    (parent, node): (NodeId, NodeId),
+    node: NodeId,
     located: &Located,
     mark: Option<&Unit>,
     next: Option<&Paragraph>,
@@ -1027,7 +1045,7 @@ fn write_paragraph(
     let document = &mut *target.document;
     if let Some(mark) = mark {
         if let Some(style) = mark.one(STYLE) {
-            let properties = document.styled(node, style);
+            let properties = document.styled(node, style).map_err(unbuilt)?;
             document
                 .compose_paragraph_properties(node, &properties)
                 .map_err(unbuilt)?;
@@ -1047,7 +1065,7 @@ fn write_paragraph(
                     level: state.level,
                 }),
             };
-            let properties = document.numbered(node, number.as_ref());
+            let properties = document.numbered(node, number.as_ref()).map_err(unbuilt)?;
             document
                 .compose_paragraph_properties(node, &properties)
                 .map_err(unbuilt)?;
@@ -1057,7 +1075,7 @@ fn write_paragraph(
         .places
         .paragraphs
         .insert(node, (located.first, located.paragraph.text.len()));
-    inlines.write(target, parent, node, located)?;
+    inlines.write(target, node, located)?;
     // A stored mark starts the next paragraph. Word writes that revision
     // on the end mark of the preceding paragraph in the same region.
     if let Some(next) = next.filter(|p| p.revision.is_some() || p.deletion.is_some()) {
@@ -1097,7 +1115,7 @@ fn write_cell_basis(
             },
             level: state.level,
         };
-        let props = document.numbered(node, Some(&number));
+        let props = document.numbered(node, Some(&number)).map_err(unbuilt)?;
         document
             .compose_paragraph_properties(node, &props)
             .map_err(unbuilt)?;
@@ -1161,10 +1179,6 @@ pub fn build(base: &Document, store: &State) -> Result<View, SessionError> {
             )
         })
         .collect();
-    let parent_children: HashMap<_, _> = regions
-        .iter()
-        .map(|r| (r.parent, document.node(r.parent).unwrap().children.clone()))
-        .collect();
     let seeded: HashMap<_, _> = body(base)?.into_iter().collect();
     let units = store.reading()?;
     // A preserved-only document has no editable region. Do not invent a
@@ -1174,7 +1188,6 @@ pub fn build(base: &Document, store: &State) -> Result<View, SessionError> {
     } else {
         group(&units)?
     };
-    let read: Vec<_> = located.iter().map(|p| &p.paragraph).collect();
     // A source run stays a node only where its own strand holds the text, so
     // that one strand can be rebuilt without reading the others.
     let mut owners = Vec::new();
@@ -1234,8 +1247,10 @@ pub fn build(base: &Document, store: &State) -> Result<View, SessionError> {
     let comments = annotations::Comments::build(&mut document, store, &located, &shown)?;
     let mut places = Places::default();
     let mut orders: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
-    for (index, paragraph) in read.iter().enumerate() {
-        let scope = located[index]
+    let mut blocks = Vec::with_capacity(located.len());
+    for (index, p) in located.iter().enumerate() {
+        let paragraph = &p.paragraph;
+        let scope = p
             .scope
             .clone()
             .or_else(|| first_scope.clone())
@@ -1243,7 +1258,6 @@ pub fn build(base: &Document, store: &State) -> Result<View, SessionError> {
         let Some(region) = scopes.get(&scope) else {
             continue;
         }; // A deliberately removed container retains its facts.
-        let unit = located[index].first;
         let like = paragraph.mark.like();
         // A copied cell can inherit a paragraph that was read-only in the file.
         if like.is_some_and(|id| {
@@ -1258,29 +1272,8 @@ pub fn build(base: &Document, store: &State) -> Result<View, SessionError> {
                 (document.loose_paragraph(region.parent, like)).map_err(unbuilt)?
             }
         };
-        if let Mark::Cell { key, .. } = &paragraph.mark {
-            if let Some(basis) = cell_basis.get(key) {
-                write_cell_basis(&mut document, node, basis, &list_numbers)?;
-            }
-        }
         orders.entry(scope).or_default().push(node);
-        let mark = (paragraph.mark != Mark::Lost).then(|| &units[unit - 1]);
-        write_paragraph(
-            &mut inlines,
-            &mut inlines::Target {
-                document: &mut document,
-                places: &mut places,
-                comments: &comments,
-            },
-            &list_numbers,
-            (region.parent, node),
-            &located[index],
-            mark,
-            located
-                .get(index + 1)
-                .filter(|p| p.scope == located[index].scope)
-                .map(|p| &p.paragraph),
-        )?;
+        blocks.push((index, node));
     }
     // Substitute each region in its source container, keeping intervening
     // tables and unknown blocks exactly where they were.
@@ -1295,7 +1288,7 @@ pub fn build(base: &Document, store: &State) -> Result<View, SessionError> {
             .flat_map(|r| r.paragraphs.iter().copied())
             .collect();
         let mut children = Vec::new();
-        for &id in &parent_children[&parent] {
+        for &id in &document.n(parent).children {
             if starts.contains(&id) {
                 let key = cell_scopes
                     .get(&id)
@@ -1308,10 +1301,32 @@ pub fn build(base: &Document, store: &State) -> Result<View, SessionError> {
         }
         document.arrange(parent, &children).map_err(unbuilt)?;
     }
-    // A run is formatted once it is in the document, where its paragraph's
-    // style counts.
-    for (run, format) in inlines.formats {
-        document.format_run(run, format).map_err(unbuilt)?;
+    // Styles, revisions and other inline markup inherit the bindings of
+    // the paragraph in its final container.
+    for (index, node) in blocks {
+        let p = &located[index];
+        if let Mark::Cell { key, .. } = &p.paragraph.mark {
+            if let Some(basis) = cell_basis.get(key) {
+                write_cell_basis(&mut document, node, basis, &list_numbers)?;
+            }
+        }
+        let mark = (p.paragraph.mark != Mark::Lost).then(|| &units[p.first - 1]);
+        write_paragraph(
+            &mut inlines,
+            &mut inlines::Target {
+                document: &mut document,
+                places: &mut places,
+                comments: &comments,
+            },
+            &list_numbers,
+            node,
+            p,
+            mark,
+            located
+                .get(index + 1)
+                .filter(|next| next.scope == p.scope)
+                .map(|next| &next.paragraph),
+        )?;
     }
     Ok(View {
         document,
@@ -1663,21 +1678,13 @@ impl Working {
             });
         }
         let mut items = Vec::new();
-        for (offset, unit) in units.range(at..at + len).enumerate() {
+        let range = at..at + len;
+        let mut crosses_mark = false;
+        for unit in units.range(range.clone()) {
             if let Some(mark) = mark_of(unit)? {
+                crosses_mark = true;
                 if let Some(like) = mark.like() {
                     self.base.check_source_mark(like)?;
-                }
-                // This sequence entry begins the next paragraph, but in
-                // DOCX the boundary belongs to the paragraph before it.
-                let view = self.built()?;
-                if let Some((&previous, _)) = view
-                    .places
-                    .paragraphs
-                    .iter()
-                    .find(|(_, (first, len))| *first + *len == at + offset)
-                {
-                    view.document.check_source_mark(previous)?;
                 }
             }
             if let Some(Inline::Source { node, .. }) = inline_of(unit)? {
@@ -1699,7 +1706,7 @@ impl Working {
                         | NodeKind::Break { .. }
                         | NodeKind::Drawing(_)
                         | NodeKind::Marker { .. } => {}
-                        NodeKind::Revision(revision) if revision.change == "del" => {}
+                        kind if recorded_deletion(kind) => {}
                         _ => {
                             return Err(SessionError::Unsupported {
                                 command,
@@ -1709,6 +1716,19 @@ impl Working {
                     }
                 }
                 items.push(node);
+            }
+        }
+        if crosses_mark {
+            // A flow mark starts the next paragraph. In Word it belongs to the
+            // previous one. Check all affected paragraph ends in one pass.
+            let view = self.built()?;
+            for (&paragraph, &(first, length)) in &view.places.paragraphs {
+                let end = first + length;
+                if range.contains(&end)
+                    && matches!(&units[end].content, Content::Item { kind, .. } if kind == MARK)
+                {
+                    view.document.check_source_mark(paragraph)?;
+                }
             }
         }
         if !items.is_empty() {
@@ -1794,11 +1814,8 @@ impl Working {
             if let Some((paragraph, _)) = view.point_at(insert_at) {
                 let &(first, len) = &view.places.paragraphs[&paragraph];
                 if insert_at == first + len {
-                    if let NodeKind::Paragraph(info) = &view.document.node(paragraph).unwrap().kind
-                    {
-                        if let Some(next) = view.document.next_style(info) {
-                            inherited_style = Some(next);
-                        }
+                    if let Some(next) = view.document.next_style(paragraph) {
+                        inherited_style = Some(next);
                     }
                 }
             }
@@ -1844,20 +1861,24 @@ impl Working {
                     }
                 }
             }
-            let mut cancel = Vec::new();
-            let mut mark: Vec<(usize, usize)> = Vec::new();
+            // Stretches of adjoining units, as (first, length).
+            let (mut cancel, mut mark) = (Vec::<(usize, usize)>::new(), Vec::new());
             for (offset, unit) in units.range(at..at + len).enumerate() {
-                if deletion_of(unit)?.is_some() {
+                // The paragraph writer emits a paragraph-level source item whole. Once
+                // validated above, a bookmark or imported deletion stays as it was.
+                let preserved = matches!(&unit.content, Content::Item { kind, .. } if kind == INLINE)
+                    && inline_of(unit)?
+                        .and_then(|inline| inline.paragraph_child(&self.base))
+                        .is_some();
+                if preserved || deletion_of(unit)?.is_some() {
                     continue;
                 }
-                if insertion_of(unit)?.is_some_and(|by| by.author == track.author) {
-                    cancel.push(at + offset);
-                } else {
-                    let at = at + offset;
-                    match mark.last_mut() {
-                        Some((first, len)) if *first + *len == at => *len += 1,
-                        _ => mark.push((at, 1)),
-                    }
+                let own = insertion_of(unit)?.is_some_and(|by| by.author == track.author);
+                let stretches = if own { &mut cancel } else { &mut mark };
+                let at = at + offset;
+                match stretches.last_mut() {
+                    Some((first, len)) if *first + *len == at => *len += 1,
+                    _ => stretches.push((at, 1)),
                 }
             }
             if !mark.is_empty() {
@@ -1870,9 +1891,9 @@ impl Working {
                     self.positions.range(at, len, (DELETION, Some(&value)))?;
                 }
             }
-            next -= cancel.len();
-            for at in cancel.into_iter().rev() {
-                self.positions.delete(at, 1)?;
+            next -= cancel.iter().map(|(_, len)| len).sum::<usize>();
+            for (at, len) in cancel.into_iter().rev() {
+                self.positions.delete(at, len)?;
             }
         }
         let (client, clock) = self.positions.next_identity();
@@ -2053,11 +2074,13 @@ impl Working {
         };
         // A caret beside a field looks past the field's end first. A range
         // that starts at a result's first character takes the field's start.
-        let (from, to) = (
-            &self.outside_fields(from, from == to)?,
-            &self.outside_fields(to, true)?,
-        );
+        let caret = from == to;
+        let from = &self.outside_fields(from, caret)?;
         let (a, basis) = self.insertion(from).map_err(unsupported)?;
+        if caret {
+            return Ok((a, a, basis));
+        }
+        let to = &self.outside_fields(to, true)?;
         let b = self.position(to).map_err(unsupported)?;
         if a > b {
             return Err(unsupported("names a range that ends before it starts"));
@@ -2454,12 +2477,7 @@ impl Working {
                         "the document has no paragraph style with that ID",
                     ));
                 }
-                let default = view
-                    .document
-                    .styles
-                    .default_paragraph_style()
-                    .map(|s| s.id.as_str());
-                let has = |p: &NodeId| matches!(&view.document.n(*p).kind, NodeKind::Paragraph(info) if info.style.as_deref().or(default) == Some(style.as_str()));
+                let has = |&p: &NodeId| view.document.paragraph_style(p) == Some(style.as_str());
                 // As for a format: all of the selection, or nothing.
                 let values = match paragraphs.iter().all(has) {
                     true => Vec::new(),
@@ -2488,6 +2506,12 @@ impl Working {
                     {
                         return Err(unsupported("the document has no list with that number"));
                     }
+                }
+                if paragraphs.iter().all(|p| {
+                    view.places.paragraphs.contains_key(p)
+                        && view.document.direct_numbering(*p) == numbering.as_ref()
+                }) {
+                    return Ok(());
                 }
                 let state = numbering
                     .as_ref()
@@ -2537,19 +2561,23 @@ impl Working {
                 let identity = self.positions.next_identity();
                 let view = self.built()?;
                 let paragraphs = view.document.paragraph_range(*from, *to)?;
-                let near = kind.and_then(|kind| {
-                    paragraphs
-                        .iter()
-                        .copied()
-                        .chain(view.document.sibling_paragraph(paragraphs[0], -1))
-                        .chain(
-                            view.document
-                                .sibling_paragraph(*paragraphs.last().unwrap(), 1),
-                        )
-                        .find(|p| view.document.list_kind(*p) == Some(kind))
-                        .and_then(|p| view.document.list_ref(p))
-                        .cloned()
-                });
+                let near = kind
+                    .and_then(|kind| view.document.continuing_list(&paragraphs, kind))
+                    .cloned();
+                let deepest = near
+                    .as_ref()
+                    .map_or(crate::MAX_LEVEL, |n| view.document.deepest(&n.num_id));
+                if paragraphs.iter().all(|p| {
+                    view.places.paragraphs.contains_key(p)
+                        && match view.document.list_ref(*p) {
+                            Some(n) => near.as_ref().is_some_and(|target| {
+                                n.num_id == target.num_id && n.level <= deepest
+                            }),
+                            None => kind.is_none(),
+                        }
+                }) {
+                    return Ok(());
+                }
                 let rows: Vec<_> = paragraphs
                     .into_iter()
                     .map(|p| {
@@ -2561,9 +2589,6 @@ impl Working {
                         (p, level, styled)
                     })
                     .collect();
-                let deepest = near
-                    .as_ref()
-                    .map_or(8, |n| view.document.deepest(&n.num_id));
                 let basis = if let Some(number) = near {
                     Some(self.numbering_value(&number)?.basis)
                 } else {

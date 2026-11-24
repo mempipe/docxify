@@ -5,10 +5,10 @@ use std::ops::Range;
 
 use crate::edit::{check_text, Change, Track};
 use crate::error::EditError;
-use crate::format::{child, rewrite, tag_end, PPR_ORDER};
+use crate::format::{child, rewrite, tag_end, Unreadable, PPR_ORDER};
 use crate::ir::{Made, NodeId, NodeKind, RevisionInfo, Support, Tracked};
 use crate::tables::REVISIONS;
-use crate::xml::{escape_attr, qname, start_tag_name, W};
+use crate::xml::{escape_attr, is, start_tag_name, w_local, W};
 use crate::Document;
 
 /// Stands for a revision's `w:id` in the markup commands make, until export
@@ -31,29 +31,15 @@ pub(crate) fn check_track(track: &Track) -> Result<(), EditError> {
     if track.author.trim().is_empty() {
         return invalid("a tracked change needs an author");
     }
-    if !is_date(&track.date) {
+    if track
+        .date
+        .strip_suffix('Z')
+        .and_then(crate::dates::Date::parse_time)
+        .is_none()
+    {
         return invalid("the date must be written YYYY-MM-DDThh:mm:ssZ");
     }
     Ok(())
-}
-
-/// Whether a date is written as Word writes a change's time.
-fn is_date(date: &str) -> bool {
-    let b = date.as_bytes();
-    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
-    b.len() == 20
-        && digits(0..4)
-        && b[4] == b'-'
-        && digits(5..7)
-        && b[7] == b'-'
-        && digits(8..10)
-        && b[10] == b'T'
-        && digits(11..13)
-        && b[13] == b':'
-        && digits(14..16)
-        && b[16] == b':'
-        && digits(17..19)
-        && b[19] == b'Z'
 }
 
 impl Document {
@@ -78,16 +64,9 @@ impl Document {
 
     /// ` w:id="…" w:author="…" w:date="…"`, with the prefix `near` uses.
     fn revision_attributes(&self, near: NodeId, track: &Track) -> String {
-        let id = self.w_attr_name(near, "id");
-        // A document that writes its elements unprefixed declares the
-        // prefix once, on the first attribute.
-        let (declaration, id) = match id.rsplit_once(' ') {
-            Some((declaration, id)) => (format!(" {declaration}"), id.to_string()),
-            None => (String::new(), id),
-        };
-        let prefix = id.strip_suffix("id").unwrap_or_default();
+        let (declaration, prefix) = self.w_attr_prefix(near);
         format!(
-            "{declaration} {id}=\"{REVISION_ID}\" {prefix}author=\"{}\" {prefix}date=\"{}\"",
+            " {declaration}{prefix}:id=\"{REVISION_ID}\" {prefix}:author=\"{}\" {prefix}:date=\"{}\"",
             escape_attr(&track.author),
             escape_attr(&track.date)
         )
@@ -116,27 +95,43 @@ impl Document {
         insertion: Option<&Track>,
         deletion: Option<&Track>,
     ) -> Result<(), EditError> {
+        let (ppr_name, rpr_name) = (self.w_name(id, "pPr"), self.w_name(id, "rPr"));
+        let ppr = self.properties(id, "pPr")?;
+        let scope = &self.scope(id);
+        let unreadable = |e: Unreadable| e.on(id);
+        let rpr = child(&ppr, scope, "rPr").map_err(unreadable)?;
+        // An existing rPr stays in the scope of pPr. A new rPr and its marks
+        // are made in the paragraph's scope and carried into pPr together.
+        let owner = match rpr {
+            Some(_) => scope.within(&ppr[..tag_end(&ppr, 0).expect("parsed pPr")]),
+            None => scope.clone(),
+        };
         let mut set = Vec::new();
         for (change, track) in [(Change::Insertion, insertion), (Change::Deletion, deletion)] {
             if let Some(track) = track {
                 check_track(track)?;
                 let name = self.w_name(id, change.local());
-                set.push(format!("<{name}{}/>", self.revision_attributes(id, track)));
+                let mark = format!("<{name}{}/>", self.revision_attributes(id, track));
+                set.push(scope.carried_to(&owner, &mark));
             }
         }
-        let (ppr_name, rpr_name) = (self.w_name(id, "pPr"), self.w_name(id, "rPr"));
-        let ppr = self.properties(id, "pPr");
-        let scope = &self.scope(id);
-        let rpr = child(&ppr, scope, "rPr").unwrap_or_default();
-        let inside = &scope.within(&ppr[..tag_end(&ppr, 0).unwrap_or(ppr.len())]);
-        let rpr = rewrite(rpr, inside, &rpr_name, &MARK, &MARK, set);
+        let rpr = rewrite(
+            rpr.unwrap_or_default(),
+            &owner,
+            &rpr_name,
+            &MARK,
+            &MARK,
+            set,
+        )
+        .map_err(unreadable)?;
         let rpr = (!rpr.is_empty()).then_some(rpr).into_iter().collect();
-        let ppr = rewrite(&ppr, scope, &ppr_name, &PPR_ORDER, &["rPr"], rpr);
+        let ppr =
+            rewrite(&ppr, &owner, &ppr_name, &PPR_ORDER, &["rPr"], rpr).map_err(unreadable)?;
         self.replace_properties(
             id,
             "pPr",
             &ppr,
-            |scope, e| scope.is(e, "rPr"),
+            |e| is(e, W, "rPr"),
             "only the paragraph mark's tracked change can change this way",
         )?;
         if let NodeKind::Paragraph(info) = &mut self.nodes[id.index()].kind {
@@ -156,7 +151,7 @@ impl Document {
 }
 
 impl Document {
-    /// `head`, the start tag and properties of a node of story `story`, with
+    /// `head`, the start tag and properties of `node`, with
     /// the ID of each tracked change in it left for export to give, as
     /// export gives one to a change a command makes. A copy of markup that
     /// records a tracked change records a change of its own: its properties
@@ -166,8 +161,8 @@ impl Document {
     /// WordprocessingML tracked-change element is replaced. Another
     /// namespace's attribute or element of the same name is someone else's,
     /// and every other byte stays as the source has it. `None` when `head`
-    /// cannot be read with the namespaces the story's root declares.
-    pub(crate) fn renumbered(&self, story: u32, head: &str) -> Option<String> {
+    /// cannot be read in its source namespace context.
+    pub(crate) fn renumbered(&self, node: NodeId, head: &str) -> Option<String> {
         let local = |name: &str| REVISIONS.contains(&name.rsplit(':').next().unwrap_or(name));
         // Most heads record no change, and need no reading.
         let mut tags = head
@@ -176,33 +171,20 @@ impl Document {
         if !tags.any(local) {
             return Some(head.to_string());
         }
-        let story = &self.stories[story as usize];
-        let text = &story.xml.text;
-        let range = self.n(story.root).range.clone();
-        let open = crate::format::tag_end(text, range.start)?;
-        let root = &text[range.start..open];
-        let wrapped = format!(
-            "{root}{head}</{}></{}>",
-            start_tag_name(head),
-            qname(text, &range)
-        );
-        let doc = crate::xml::parse(&story.part, &wrapped).ok()?;
-        let mut ids: Vec<Range<usize>> = (doc.root_element().descendants())
-            .filter(|n| {
-                let tag = n.tag_name();
-                n.is_element() && tag.namespace() == Some(W) && REVISIONS.contains(&tag.name())
-            })
-            .flat_map(|n| n.attributes())
-            .filter(|a| a.namespace() == Some(W) && a.name() == "id")
-            .map(|a| a.range_value())
-            .collect();
+        let end = format!("</{}>", start_tag_name(head));
+        let read = self.scope(node).read(head, &end, |root, offset| {
+            (root.descendants())
+                .filter(|n| w_local(*n).is_some_and(|local| REVISIONS.contains(&local)))
+                .flat_map(|n| n.attributes())
+                .filter(|a| a.namespace() == Some(W) && a.name() == "id")
+                .map(|a| a.range_value().start - offset..a.range_value().end - offset)
+                .collect()
+        });
+        let mut ids: Vec<Range<usize>> = read.ok()?;
         ids.sort_by_key(|r| std::cmp::Reverse(r.start));
         let mut out = head.to_string();
         for id in ids {
-            out.replace_range(
-                id.start - root.len()..id.end - root.len(),
-                &REVISION_ID.to_string(),
-            );
+            out.replace_range(id, &REVISION_ID.to_string());
         }
         Some(out)
     }

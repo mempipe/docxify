@@ -578,28 +578,41 @@ impl Flow {
     }
 
     pub fn delete(&mut self, at: usize, len: usize) -> Result<(), FlowError> {
-        let places: Result<Vec<_>, _> = (at..at + len)
-            .map(|unit| {
-                place(&self.slots, unit).and_then(|found| {
-                    if found.1 < self.slots.len() {
-                        Ok(found)
-                    } else {
-                        Err(corrupt("deletion passes the end"))
-                    }
-                })
-            })
+        if len == 0 {
+            return Ok(());
+        }
+        let (mut raw, first) = place(&self.slots, at)?;
+        // The boundaries between the units stay, so each stretch of units is one removal.
+        let mut removals: Vec<(u32, u32)> = Vec::new();
+        let (mut end, mut left, mut adjoins) = (first, len, false);
+        while left > 0 {
+            let slot = (self.slots.get(end)).ok_or_else(|| corrupt("deletion passes the end"))?;
+            let width = slot.width();
+            let unit = matches!(slot, Slot::Unit(_));
+            if unit {
+                match removals.last_mut() {
+                    Some((_, len)) if adjoins => *len += width,
+                    _ => removals.push((raw, width)),
+                }
+                left -= 1;
+            }
+            adjoins = unit;
+            raw += width;
+            end += 1;
+        }
+        self.reading.take();
+        self.length -= len;
+        let kept: Vec<Slot> = (self.slots[first..end].iter())
+            .filter(|slot| !matches!(slot, Slot::Unit(_)))
+            .cloned()
             .collect();
-        for (raw, index) in places?.into_iter().rev() {
-            self.reading.take();
-            self.length -= 1;
-            let slot = self.slots.remove(index);
+        self.slots.splice(first..end, kept);
+        // Each position was read before any removal, so the later stretch goes first.
+        for (at, len) in removals.into_iter().rev() {
             self.writes.push(Write {
                 strand: String::new(),
                 tracked: true,
-                action: Action::Delete {
-                    at: raw,
-                    len: slot.width(),
-                },
+                action: Action::Delete { at, len },
             });
         }
         Ok(())
@@ -631,8 +644,31 @@ impl Flow {
 }
 
 #[cfg(test)]
-mod history_tests {
+mod tests {
     use super::*;
+
+    #[test]
+    fn a_deleted_range_is_one_removal_for_each_stretch_between_boundaries() {
+        let seeded = |text| Seeded::Text {
+            text,
+            stated: vec![("basis", Some("r"))],
+        };
+        let mut flow = Flow::seeded(0, &[seeded("a🙂b"), seeded("cd")]);
+        // Open a🙂b Close Open cd Close: the two boundaries between b and c stay.
+        let before = flow.slots().to_vec();
+        flow.delete(1, 3).unwrap();
+        let removed: Vec<_> = (flow.take_writes().into_iter())
+            .map(|write| match write.action {
+                Action::Delete { at, len } => (at, len),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(removed, [(7, 1), (2, 3)]);
+        let kept: Vec<_> = [0, 1, 4, 5, 7, 8].map(|i| before[i].clone()).into();
+        assert_eq!(flow.slots(), kept);
+        assert_eq!(flow.len(), 2);
+        assert!(flow.delete(1, 2).is_err());
+    }
 
     #[test]
     fn a_headless_typing_history_keeps_only_the_inserted_slots_on_redo() {

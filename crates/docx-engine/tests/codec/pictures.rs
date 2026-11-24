@@ -319,6 +319,25 @@ fn drawing_ids_in_preserved_content_are_taken() {
 }
 
 #[test]
+fn drawing_ids_stay_within_what_word_loads() {
+    // Word refuses a drawing ID above 2147483646, which a preserved shape holds.
+    let base = with_body(&format!(
+        r#"<w:p><w:r><w:t>Before</w:t><x:shape xmlns:x="urn:example:shape"><wp:docPr xmlns:wp="{WP}" id="2147483646" name="Shape"/></x:shape></w:r></w:p>"#
+    ));
+    let mut doc = EditingDocument::open(&base).unwrap();
+    let media = doc.0.media_name(&png()).unwrap();
+    let text = text_node(&doc, "Before");
+    let pictures = [
+        insert(at(text, 0), &media, None),
+        insert(at(text, 0), &media, Some(2_147_483_647)),
+    ];
+    doc.0.apply_all_with_media(&pictures, &[&png()]).unwrap();
+    let mut taken = ids(&doc);
+    taken.sort();
+    assert_eq!(taken, [Some(1), Some(2)]);
+}
+
+#[test]
 fn media_a_reopened_document_holds_is_not_added_again() {
     let mut doc = EditingDocument::open(&generated("simple-paragraphs")).unwrap();
     let media = doc.0.media_name(&png()).unwrap();

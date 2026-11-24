@@ -447,3 +447,43 @@ fn comments_that_cannot_be_written_are_refused() {
         .expect("a field result");
     refused(&fields, comment(at(result, 0), at(result, 0), "In a field"));
 }
+
+#[test]
+fn comment_ids_stay_within_what_word_reads() {
+    let mut doc = EditingDocument::open(&generated("simple-paragraphs")).unwrap();
+    let wanted = |text, id| Command::AddComment {
+        from: at(text, 0),
+        to: at(text, 1),
+        text: "x".into(),
+        by: alice(),
+        initials: None,
+        id: Some(id),
+    };
+    let para = paragraph_with(&doc, "First paragraph.");
+    let first = |doc: &Document| {
+        doc.descendants(para)
+            .into_iter()
+            .find(|&n| matches!(&doc.node(n).unwrap().kind, NodeKind::Text { .. }))
+            .unwrap()
+    };
+    // The highest ID Word reads, the same again, and one Word cannot read.
+    for id in [i32::MAX as u32, i32::MAX as u32, u32::MAX] {
+        let point = first(&doc);
+        edit(&mut doc, wanted(point, id));
+    }
+    let mut ids: Vec<String> = comments(&doc).into_iter().map(|c| c.0).collect();
+    ids.sort();
+    assert_eq!(ids, ["0", "1", "2147483647"]);
+    assert_valid("ids", &doc.export().unwrap());
+}
+
+#[test]
+fn a_comment_takes_no_id_a_preserved_marker_names() {
+    let bytes = with_body(
+        r#"<w:p><w:r><w:t>Text</w:t><x:shape xmlns:x="urn:example:shape"><w:commentReference w:id="0"/></x:shape></w:r></w:p>"#,
+    );
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let text = text_node(&doc, "Text");
+    edit(&mut doc, comment(at(text, 0), at(text, 1), "New"));
+    assert_eq!(comments(&doc)[0].0, "1");
+}

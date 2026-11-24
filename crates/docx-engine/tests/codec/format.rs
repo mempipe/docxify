@@ -775,6 +775,29 @@ fn typing_at_an_empty_source_run_uses_its_format() {
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
 #[test]
+fn unprefixed_properties_keep_the_word_namespace_of_their_attributes() {
+    let bytes = with_body(&format!(
+        r#"<p xmlns="{W}"><pPr xmlns:w="urn:extension"><keepNext/></pPr><r><rPr xmlns:w="urn:extension"><i/></rPr><t>Target</t></r></p>"#
+    ));
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let text = text_node(&doc, "Target");
+    edit(&mut doc, set_style(at(text, 0), at(text, 0), "Heading1"));
+    let text = text_node(&doc, "Target");
+    let underline = Format {
+        underline: Some(true),
+        ..Format::default()
+    };
+    edit(&mut doc, format_range(at(text, 0), at(text, 6), underline));
+
+    let reopened = reopen("rebound attribute prefix", &doc);
+    for view in [&*doc, &reopened] {
+        let paragraph = paragraph_with(view, "Target");
+        assert_eq!(style_of(view, paragraph).as_deref(), Some("Heading1"));
+        assert!(shown(view, text_node(view, "Target")).2);
+    }
+}
+
+#[test]
 fn properties_are_found_by_namespace_and_keep_their_own_markup() {
     // Another prefix for WordprocessingML, declared on the paragraph.
     let base = with_body(&format!(
@@ -905,5 +928,245 @@ fn formatting_uses_decoded_property_values_before_and_after_save() {
             };
             assert_eq!(info.style.as_deref(), Some("A&B"));
         }
+    }
+}
+
+#[test]
+fn typing_from_an_empty_paragraph_mark_keeps_its_property_scope() {
+    let bytes = with_body(
+        r#"<w:p><w:pPr xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:rPr><q:b/></w:rPr></w:pPr></w:p>"#,
+    );
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let start = doc.paragraphs()[0];
+    edit(
+        &mut doc,
+        Command::InsertText {
+            at: Point::Start { start },
+            text: "X".into(),
+        },
+    );
+    let reopened = reopen("paragraph mark namespace", &doc);
+    let run = reopened
+        .descendants(reopened.paragraphs()[0])
+        .into_iter()
+        .find(|&id| matches!(reopened.node(id).unwrap().kind, NodeKind::Run(_)))
+        .unwrap();
+    assert_eq!(reopened.effective_run_props(run).bold, Some(true));
+    assert_editor_undo("paragraph mark namespace", &bytes, &mut doc);
+}
+
+/// The body's text and the XML comments around it, in document order.
+fn text_and_comments(bytes: &[u8]) -> String {
+    let xml = part(bytes, DOCUMENT);
+    let tree = roxmltree::Document::parse(&xml).unwrap();
+    tree.descendants()
+        .filter_map(|n| match n.node_type() {
+            roxmltree::NodeType::Comment => Some(format!("<!--{}-->", n.text()?)),
+            roxmltree::NodeType::Text if n.parent()?.has_tag_name((W, "t")) => {
+                n.text().map(str::to_string)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn markup_at_the_edges_of_a_run_or_link_is_written_once_where_it_was() {
+    let run = "<w:p><w:r><!--before--><w:t>ABCDE</w:t><!--after--></w:r></w:p>";
+    let link = r#"<w:p><w:hyperlink w:anchor="mark"><!--before--><w:r><w:t>ABCDE</w:t></w:r><!--after--></w:hyperlink></w:p>"#;
+    for body in [run, link] {
+        let bytes = with_body(body);
+        let check = |name: &str, command: &dyn Fn(NodeId) -> Command, want: &str| {
+            let mut doc = EditingDocument::open(&bytes).unwrap();
+            let text = text_node(&doc, "ABCDE");
+            edit(&mut doc, command(text));
+            let out = doc.export().unwrap();
+            assert_eq!(text_and_comments(&out), want, "{name} in {body}");
+            assert_editor_undo(name, &bytes, &mut doc);
+        };
+        for (from, to) in [(0, 5), (1, 3), (0, 2), (3, 5)] {
+            check(
+                &format!("bold {from}..{to}"),
+                &|text| format_range(at(text, from), at(text, to), BOLD),
+                "<!--before-->ABCDE<!--after-->",
+            );
+        }
+        check(
+            "typing",
+            &|text| Command::InsertText {
+                at: at(text, 2),
+                text: "x".into(),
+            },
+            "<!--before-->ABxCDE<!--after-->",
+        );
+        check(
+            "split",
+            &|text| Command::SplitParagraph { at: at(text, 2) },
+            "<!--before-->ABCDE<!--after-->",
+        );
+        // The untouched text stays in its source run, beside a copy for the insertion.
+        for (offset, want) in [
+            (0, "<!--before-->xABCDE<!--after-->"),
+            (2, "<!--before-->ABxCDE<!--after-->"),
+            (5, "<!--before-->ABCDEx<!--after-->"),
+        ] {
+            check(
+                &format!("tracked insertion at {offset}"),
+                &|text| Command::ReplaceRange {
+                    from: at(text, offset),
+                    to: at(text, offset),
+                    text: "x".into(),
+                    track: Some(docx_engine::Track {
+                        author: "Alice".into(),
+                        date: "2026-11-16T10:00:00Z".into(),
+                    }),
+                },
+                want,
+            );
+        }
+    }
+}
+
+/// WordprocessingML's namespace, written with a character reference.
+const ESCAPED: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006&#x2F;main";
+/// An extension whose text holds what looks like the start of a tag.
+const CDATA: &str = r#"<e:ext xmlns:e="urn:extension"><![CDATA[1 < 2]]></e:ext>"#;
+const KEPT: &str = r#"<e:kept xmlns:e="urn:extension"/>"#;
+
+/// How many WordprocessingML `local` children each `parent` element of the
+/// body holds, as an XML parser reads the exported part.
+fn children_named(bytes: &[u8], parent: &str, local: &str) -> Vec<usize> {
+    let xml = part(bytes, DOCUMENT);
+    let tree = roxmltree::Document::parse(&xml).unwrap();
+    tree.descendants()
+        .filter(|n| n.has_tag_name((W, parent)))
+        .map(|n| n.children().filter(|c| c.has_tag_name((W, local))).count())
+        .collect()
+}
+
+#[test]
+fn run_properties_are_found_as_the_xml_parser_reads_them() {
+    let escaped = format!(
+        r#"<w:p><w:r><q:rPr xmlns:q="{ESCAPED}"><q:b/>{KEPT}</q:rPr><w:t>ABCDE</w:t></w:r></w:p>"#
+    );
+    let cdata = format!("<w:p><w:r><w:rPr><w:b/>{CDATA}</w:rPr><w:t>ABCDE</w:t></w:r></w:p>");
+    let italic = Format {
+        italic: Some(true),
+        ..Format::default()
+    };
+    type Shown = Vec<(String, bool, bool)>;
+    let whole: Shown = vec![("ABCDE".into(), true, true)];
+    let middle: Shown = vec![
+        ("A".into(), true, false),
+        ("BC".into(), true, true),
+        ("DE".into(), true, false),
+    ];
+    for (name, body, extension) in [("CDATA", &cdata, CDATA), ("escaped", &escaped, KEPT)] {
+        let bytes = with_body(body);
+        for (from, to, want) in [(0, 5, &whole), (1, 3, &middle)] {
+            let name = format!("{name} {from}..{to}");
+            let mut doc = EditingDocument::open(&bytes).unwrap();
+            let text = text_node(&doc, "ABCDE");
+            assert_eq!(shown(&doc, text), (true, false, false), "{name}: opened");
+            edit(&mut doc, format_range(at(text, from), at(text, to), italic));
+            let out = doc.export().unwrap();
+            let reopened = Document::open(&out).unwrap();
+            for (which, view) in [("live", &*doc), ("reopened", &reopened)] {
+                let runs: Shown = view
+                    .descendants(view.paragraphs()[0])
+                    .into_iter()
+                    .filter_map(|id| match &view.node(id).unwrap().kind {
+                        NodeKind::Text { text } => {
+                            let (bold, italic, _) = shown(view, id);
+                            Some((text.clone(), bold, italic))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(&runs, want, "{name}: {which}");
+            }
+            // Each run keeps one properties element, with the extension in it.
+            let blocks = children_named(&out, "r", "rPr");
+            assert_eq!(blocks, vec![1; want.len()], "{name}");
+            let xml = part(&out, DOCUMENT);
+            assert_eq!(xml.matches(extension).count(), want.len(), "{name}: {xml}");
+            assert_editor_undo(&name, &bytes, &mut doc);
+        }
+    }
+}
+
+#[test]
+fn paragraph_properties_are_found_as_the_xml_parser_reads_them() {
+    let escaped = format!(
+        r#"<w:p><q:pPr xmlns:q="{ESCAPED}"><q:pStyle q:val="Heading1"/><q:keepNext/>{KEPT}</q:pPr><w:r><w:t>Styled</w:t></w:r></w:p>"#
+    );
+    let cdata = format!(
+        r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:keepNext/>{CDATA}</w:pPr><w:r><w:t>Styled</w:t></w:r></w:p>"#
+    );
+    let base = generated("headings-styles");
+    let source = part(&base, DOCUMENT);
+    let (start, end) = (
+        source.find("<w:body>").unwrap() + 8,
+        source.find("<w:sectPr").unwrap(),
+    );
+    for (name, body, extension) in [("CDATA", &cdata, CDATA), ("escaped", &escaped, KEPT)] {
+        let xml = format!("{}{body}{}", &source[..start], &source[end..]);
+        let bytes = rewrite(&base, DOCUMENT, Some(xml.as_bytes()));
+        let mut doc = EditingDocument::open(&bytes).unwrap();
+        let text = text_node(&doc, "Styled");
+        edit(&mut doc, set_style(at(text, 0), at(text, 0), "Title"));
+        let out = doc.export().unwrap();
+        let reopened = Document::open(&out).unwrap();
+        for (which, view) in [("live", &*doc), ("reopened", &reopened)] {
+            let paragraph = paragraph_with(view, "Styled");
+            assert_eq!(
+                style_of(view, paragraph).as_deref(),
+                Some("Title"),
+                "{name}: {which}"
+            );
+            assert!(
+                view.effective_paragraph(paragraph).keep_next,
+                "{name}: {which}"
+            );
+        }
+        assert_eq!(children_named(&out, "p", "pPr"), [1], "{name}");
+        assert_eq!(children_named(&out, "pPr", "pStyle"), [1], "{name}");
+        let xml = part(&out, DOCUMENT);
+        assert_eq!(xml.matches(extension).count(), 1, "{name}: {xml}");
+        assert_editor_undo(name, &bytes, &mut doc);
+    }
+}
+
+#[test]
+fn style_commands_use_the_same_default_as_the_picker() {
+    let bytes = generated("undefined-paragraph-style");
+    let styles = part(&bytes, "word/styles.xml")
+        .replace(r#"<w:name w:val="Normal"/>"#, r#"<w:name w:val="Normal"/><w:next w:val="Body"/>"#)
+        .replace("</w:styles>", r#"<w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/></w:style></w:styles>"#);
+    let bytes = rewrite(&bytes, "word/styles.xml", Some(styles.as_bytes()));
+    for index in [0, 1] {
+        let mut doc = EditingDocument::open(&bytes).unwrap();
+        let at = Point::End {
+            end: doc.paragraphs()[index],
+        };
+        edit(
+            &mut doc,
+            Command::SetParagraphStyle {
+                from: at,
+                to: at,
+                style: "Normal".into(),
+            },
+        );
+        assert!(!doc.0.undo(), "the effective style already matched");
+        assert!(doc.export().unwrap() == bytes);
+        edit(&mut doc, Command::SplitParagraph { at });
+        let saved = Document::open(&doc.export().unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .inspect_node(saved.paragraphs()[index + 1])
+                .unwrap()
+                .effective_style,
+            Some("Body")
+        );
     }
 }

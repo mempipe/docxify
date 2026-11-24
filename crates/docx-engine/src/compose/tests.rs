@@ -81,7 +81,7 @@ fn new_content_is_made_loose_and_arranged_in() {
     let word = children(&doc, bold)[0];
     // A copy of the bold run takes new text and a line break, and a run
     // like the italic one takes text in the first paragraph.
-    let copy = doc.empty_like(bold).unwrap();
+    let copy = doc.empty_like(bold, true).unwrap();
     let more = doc.loose_text(first, "er").unwrap();
     let line = doc.loose_break(first).unwrap();
     doc.arrange(copy, &[line, more]).unwrap();
@@ -144,11 +144,11 @@ fn arranging_refuses_what_would_not_be_a_tree() {
     assert!(!doc.is_dirty());
     assert_eq!(document_xml(&doc), before);
     assert!(matches!(
-        doc.empty_like(first),
+        doc.empty_like(first, true),
         Err(EditError::WrongKind { .. })
     ));
     assert!(matches!(
-        doc.empty_like(word),
+        doc.empty_like(word, true),
         Err(EditError::WrongKind { .. })
     ));
 }
@@ -162,7 +162,7 @@ fn a_copy_of_a_run_with_a_tracked_formatting_change_gets_its_own_revision_id() {
     let mut doc = Document::open(&bytes).unwrap();
     let paragraph = doc.paragraphs()[0];
     let run = children(&doc, paragraph)[0];
-    let copy = doc.empty_like(run).unwrap();
+    let copy = doc.empty_like(run, true).unwrap();
     let more = doc.loose_text(paragraph, " still").unwrap();
     doc.arrange(copy, &[more]).unwrap();
     doc.arrange(paragraph, &[run, copy]).unwrap();
@@ -193,7 +193,7 @@ fn only_a_word_revision_id_on_a_word_tracked_change_is_renumbered_in_a_copy() {
     let mut doc = Document::open(&bytes).unwrap();
     let paragraph = doc.paragraphs()[0];
     let run = children(&doc, paragraph)[0];
-    let copy = doc.empty_like(run).unwrap();
+    let copy = doc.empty_like(run, true).unwrap();
     let more = doc.loose_text(paragraph, " still").unwrap();
     doc.arrange(copy, &[more]).unwrap();
     doc.arrange(paragraph, &[run, copy]).unwrap();
@@ -222,7 +222,7 @@ fn a_loose_paragraph_and_a_formatted_run_are_built_without_a_command() {
     let (centred, bold) = (held[0], children(&doc, held[1])[0]);
 
     let paragraph = doc.loose_paragraph(story, Some(centred)).unwrap();
-    let run = doc.empty_like(bold).unwrap();
+    let run = doc.empty_like(bold, true).unwrap();
     let text = doc.loose_text(run, "new").unwrap();
     doc.arrange(run, &[text]).unwrap();
     // A run is formatted where it is in the document, since its

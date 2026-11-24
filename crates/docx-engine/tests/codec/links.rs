@@ -320,22 +320,92 @@ fn the_added_hyperlink_style_takes_an_id_no_style_or_run_names() {
         r#"<w:style w:type="paragraph" w:styleId="Hyperlink"><w:name w:val="Link List"/></w:style></w:styles>"#,
     );
     let document = part(&bytes, DOCUMENT).replace(
-        "<w:r><w:t>Second paragraph.</w:t></w:r>",
-        r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink1"/></w:rPr><w:t>Second paragraph.</w:t></w:r>"#,
+        "<w:r><w:t>Third paragraph.</w:t></w:r>",
+        r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink1"/></w:rPr><w:t>Third paragraph.</w:t></w:r>"#,
     );
+    let bytes = rewrite(&bytes, STYLES, Some(styles.as_bytes()));
+    let bytes = rewrite(&bytes, DOCUMENT, Some(document.as_bytes()));
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let second = paragraph_with(&doc, "Second");
+    edit(&mut doc, Command::MergeParagraphs { paragraph: second });
+    let first = text_node(&doc, "First");
+    edit(
+        &mut doc,
+        set_link(at(first, 0), at(first, 5), Some("https://example.com/")),
+    );
+    let reopened = Document::open(&doc.export().unwrap()).unwrap();
+    for view in [&*doc, &reopened] {
+        assert_eq!(run_look(view, "First").0.as_deref(), Some("Hyperlink2"));
+        assert_eq!(
+            run_look(view, "Third paragraph."),
+            (Some("Hyperlink1".into()), None, None)
+        );
+    }
+}
+
+#[test]
+fn adding_a_link_preserves_inherited_and_paragraph_mark_styles() {
+    let bytes = generated("simple-paragraphs");
+    let styles = part(&bytes, STYLES).replace(
+        r#"<w:name w:val="Emphasis"/>"#,
+        r#"<w:name w:val="Emphasis"/><w:basedOn w:val="Hyperlink"/>"#,
+    );
+    let document = part(&bytes, DOCUMENT)
+        .replace(
+            "<w:r><w:t>Second paragraph.",
+            r#"<w:r><w:rPr><w:rStyle w:val="Emphasis"/></w:rPr><w:t>Second paragraph."#,
+        )
+        .replace(
+            "<w:r><w:t>Third paragraph.</w:t></w:r>",
+            r#"<w:pPr><w:rPr><w:rStyle w:val="Hyperlink1"/></w:rPr></w:pPr>"#,
+        );
     let bytes = rewrite(&bytes, STYLES, Some(styles.as_bytes()));
     let bytes = rewrite(&bytes, DOCUMENT, Some(document.as_bytes()));
     let mut doc = EditingDocument::open(&bytes).unwrap();
     let first = text_node(&doc, "First");
     edit(
         &mut doc,
-        set_link(at(first, 0), at(first, 5), Some("https://example.com/")),
+        set_link(at(first, 0), at(first, 5), Some("#here")),
     );
-    assert_eq!(run_look(&doc, "First").0.as_deref(), Some("Hyperlink2"));
-    assert_eq!(
-        run_look(&doc, "Second paragraph.").0.as_deref(),
-        Some("Hyperlink1")
+    let end = doc.paragraphs()[2];
+    edit(
+        &mut doc,
+        Command::InsertText {
+            at: Point::End { end },
+            text: "Other".into(),
+        },
     );
+
+    let reopened = Document::open(&doc.export().unwrap()).unwrap();
+    for view in [&*doc, &reopened] {
+        assert_eq!(
+            run_look(view, "Second paragraph."),
+            (Some("Emphasis".into()), None, None)
+        );
+        assert_eq!(
+            run_look(view, "Other"),
+            (Some("Hyperlink1".into()), None, None)
+        );
+        assert_eq!(run_look(view, "First").0.as_deref(), Some("Hyperlink2"));
+    }
+}
+
+#[test]
+fn a_generated_character_style_never_formats_an_unrelated_paragraph() {
+    let xml = r#"<w:p><w:r><w:t>First</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Hyperlink"/></w:pPr><w:r><w:t>Other</w:t></w:r></w:p>"#;
+    let mut doc = EditingDocument::open(&with_body(xml)).unwrap();
+    let before = run_look(&doc, "Other");
+    let first = text_node(&doc, "First");
+    edit(
+        &mut doc,
+        set_link(at(first, 0), at(first, 5), Some("#here")),
+    );
+    let bytes = doc.export().unwrap();
+    assert!(part(&bytes, DOCUMENT).contains(r#"<w:pStyle w:val="Hyperlink"/>"#));
+    for view in [&*doc, &Document::open(&bytes).unwrap()] {
+        assert_eq!(run_look(view, "Other"), before);
+        assert_eq!(run_look(view, "First").0.as_deref(), Some("Hyperlink"));
+    }
 }
 
 #[test]

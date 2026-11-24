@@ -7,7 +7,7 @@ use crate::edit::{Point, TextRange};
 use crate::error::EditError;
 use crate::import::NO_EDIT;
 use crate::ir::{DrawingInfo, Made, Node, NodeId, NodeKind, ParagraphInfo, RunInfo, Support};
-use crate::xml::{escape_attr, qname, W};
+use crate::xml::{qname, W};
 use crate::Document;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +106,9 @@ fn holds_reason(what: &str) -> &'static str {
     match what {
         "a footnote or endnote reference" => {
             "it holds a footnote or endnote reference; removing it would orphan the note"
+        }
+        "a deletion-locked content control" => {
+            "it holds a content control that is locked against deletion"
         }
         "a comment" => "it holds a comment; no command removes comments yet",
         "a bookmark" => "it holds a bookmark whose other end may be elsewhere",
@@ -510,9 +513,14 @@ impl Document {
     /// Attributes never take a default namespace, so a document that writes
     /// its elements unprefixed gets a local declaration.
     pub(crate) fn w_attr_name(&self, near: NodeId, local: &str) -> String {
+        let (declaration, prefix) = self.w_attr_prefix(near);
+        format!("{declaration}{prefix}:{local}")
+    }
+
+    pub(crate) fn w_attr_prefix(&self, near: NodeId) -> (String, String) {
         match self.element_name(near).split_once(':') {
-            Some((prefix, _)) => format!("{prefix}:{local}"),
-            None => format!("xmlns:w=\"{W}\" w:{local}"),
+            Some((prefix, _)) => (String::new(), prefix.to_owned()),
+            None => self.scope(near).attribute_prefix(W, "w"),
         }
     }
 
@@ -576,68 +584,14 @@ impl Document {
         (parent, index)
     }
 
-    /// A new, empty node like `id`, to take `id`'s children from `index` on.
-    ///
-    /// A paragraph copy has a bare start tag, so Word's paragraph IDs stay
-    /// unique, and a copy of the paragraph properties. After an Enter at the
-    /// end of a paragraph whose style names a different next style, it gets
-    /// that style alone, as in Word: a heading is followed by body text. The
-    /// default style is written as no style, as Word writes it. The copy is
-    /// like `id`, as [`like`](Document::like) reports, unless it is bare.
-    pub(crate) fn copy_of(&mut self, id: NodeId, index: usize) -> NodeId {
-        let node = self.n(id);
-        let story = node.story;
-        let name = self.element_name(id);
-        let tail = format!("</{name}>");
-        let mut like = self.like(id);
-        let (kind, head) = match &node.kind {
-            NodeKind::Paragraph(info) => {
-                let at_end = node.children[index..].iter().all(|&c| self.invisible(c));
-                match self.next_style(info).filter(|_| at_end) {
-                    Some(next) => {
-                        let default = self.styles.default_paragraph_style();
-                        let style = (default.is_none_or(|s| s.id != next)).then_some(next);
-                        let head = match &style {
-                            Some(next) => {
-                                let ppr = self.w_name(id, "pPr");
-                                let style = self.w_name(id, "pStyle");
-                                let val = self.w_attr_name(id, "val");
-                                format!(
-                                    "<{name}><{ppr}><{style} {val}=\"{}\"/></{ppr}>",
-                                    escape_attr(next)
-                                )
-                            }
-                            None => format!("<{name}>"),
-                        };
-                        let info = ParagraphInfo {
-                            style,
-                            ..ParagraphInfo::default()
-                        };
-                        like = None;
-                        (NodeKind::Paragraph(Box::new(info)), head)
-                    }
-                    None => {
-                        let (info, props) = self.paragraph_like(id, false);
-                        (
-                            NodeKind::Paragraph(Box::new(info)),
-                            format!("<{name}>{props}"),
-                        )
-                    }
-                }
-            }
-            kind => (kind.clone(), self.head(id)),
+    pub(crate) fn next_style(&self, paragraph: NodeId) -> Option<String> {
+        let NodeKind::Paragraph(info) = &self.n(paragraph).kind else {
+            return None;
         };
-        self.create(kind, Support::Editable, Made { head, tail, like }, story)
-    }
-
-    pub(crate) fn next_style(&self, info: &ParagraphInfo) -> Option<String> {
         if info.props.numbering.is_some() {
             return None;
         }
-        let current = info
-            .style
-            .as_deref()
-            .or_else(|| self.styles.default_paragraph_style().map(|s| s.id.as_str()))?;
+        let current = self.paragraph_style(paragraph)?;
         let next = self.styles.styles.get(current)?.next.as_deref()?;
         (next != current).then(|| next.to_string())
     }
@@ -657,13 +611,20 @@ impl Document {
             NodeKind::Run(info) if !info.format_revision => {
                 let head = self.source_tags(self.story_text(node), node).0.into_owned();
                 let mut info = RunInfo::clone(info);
-                let rpr = self.source_properties(like, "rPr");
+                let rpr = self.source_properties(like, "rPr")?;
                 (info.style, info.props) = self.run_properties_from(like, &rpr)?;
                 Ok((info, head, Some(like)))
             }
             NodeKind::Paragraph(info) => match info.mark_run.as_deref() {
                 Some(mark) if info.mark_revision.is_none() && !mark.info.format_revision => {
-                    let props = &self.story_text(node)[mark.range.clone()];
+                    let xml = self.story_text(node);
+                    let ppr = self.source_properties(like, "pPr")?;
+                    let end = crate::format::tag_end(&ppr, 0).ok_or(EditError::Refused {
+                        node: like,
+                        reason: "the paragraph mark properties could not be read",
+                    })?;
+                    let inside = self.scope(like).within(&ppr[..end]);
+                    let props = inside.carried_to(&self.scope(near), &xml[mark.range.clone()]);
                     Ok((mark.info.clone(), format!("<{name}>{props}"), Some(like)))
                 }
                 _ => refuse(like, "its paragraph mark has no run properties to copy"),
@@ -680,7 +641,11 @@ impl Document {
     /// `like`: its properties without tracked changes, conditional
     /// formatting or a section break, as it has them now, or as its source
     /// has them when `source`.
-    pub(crate) fn paragraph_like(&self, like: NodeId, source: bool) -> (ParagraphInfo, String) {
+    pub(crate) fn paragraph_like(
+        &self,
+        like: NodeId,
+        source: bool,
+    ) -> Result<(ParagraphInfo, String), EditError> {
         let NodeKind::Paragraph(info) = &self.n(like).kind else {
             unreachable!("a paragraph");
         };
@@ -696,15 +661,14 @@ impl Document {
             ..ParagraphInfo::clone(info)
         };
         let props = match source {
-            true => self.source_properties(like, "pPr"),
-            false => self.properties(like, "pPr"),
+            true => self.source_properties(like, "pPr")?,
+            false => self.properties(like, "pPr")?,
         };
         let mut stripped = crate::tables::REVISIONS.to_vec();
         stripped.extend(["cnfStyle", "sectPr"]);
-        (
-            info,
-            crate::format::without(&props, &self.scope(like), &stripped),
-        )
+        let props =
+            crate::format::without(&props, &self.scope(like), &stripped).map_err(|e| e.on(like))?;
+        Ok((info, props))
     }
 
     /// A node from the source, whose properties a made node can copy.
@@ -726,7 +690,7 @@ impl Document {
         near: NodeId,
         like: Option<NodeId>,
     ) -> Result<NodeId, EditError> {
-        let name = self.w_name(near, "p");
+        let name = self.w_name(like.unwrap_or(near), "p");
         let (info, head) = match like {
             None => (ParagraphInfo::default(), format!("<{name}>")),
             Some(like) => {
@@ -738,7 +702,7 @@ impl Document {
                         expected: "a paragraph",
                     });
                 }
-                let (mut info, props) = self.paragraph_like(like, true);
+                let (mut info, props) = self.paragraph_like(like, true)?;
                 (info.style, info.props) = self.paragraph_properties_from(like, &props)?;
                 (info, format!("<{name}>{props}"))
             }
@@ -753,7 +717,7 @@ impl Document {
         );
         // The copied properties can use a prefix `like` declares on itself.
         if let Some(like) = like {
-            self.declare_namespaces(paragraph, like);
+            self.declare_namespaces(paragraph, &self.scope(like), &self.content_scope(near));
         }
         Ok(paragraph)
     }
@@ -1002,9 +966,9 @@ impl Document {
             NodeKind::Revision(_) => {
                 Some("a tracked move has two halves; accept or reject the move first")
             }
-            NodeKind::ContentControl {
-                lock: Some(lock), ..
-            } if lock == "sdtLocked" || lock == "sdtContentLocked" => {
+            NodeKind::ContentControl { lock, .. }
+                if crate::controls::deletion_locked(lock.as_deref()) =>
+            {
                 Some("the content control is locked against deletion")
             }
             NodeKind::ContentControl { .. } | NodeKind::Table(_) | NodeKind::Row(_) => None,
@@ -1075,9 +1039,9 @@ impl Document {
         for end in self.removal_nodes(id)? {
             let (parent, index) = self.detach(end);
             if self.n(end).preserved_cells.is_some() {
-                for (i, blank) in self.wrapper_vacancies(parent, end)?.into_iter().enumerate() {
-                    self.attach(blank, parent, index + i);
-                }
+                let mut children = self.n(parent).children.clone();
+                children.splice(index..index, self.wrapper_vacancies(parent, end)?);
+                self.arrange(parent, &children)?;
             }
             if matches!(self.n(parent).kind, NodeKind::Run(_)) && self.n(parent).children.is_empty()
             {
@@ -1164,13 +1128,10 @@ impl Document {
                             "it holds one end of a tracked move; accept or reject the move first",
                         );
                     }
-                    NodeKind::ContentControl {
-                        lock: Some(lock), ..
-                    } if lock == "sdtLocked" || lock == "sdtContentLocked" => {
-                        return refuse(
-                            id,
-                            "it holds a content control that is locked against deletion",
-                        );
+                    NodeKind::ContentControl { lock, .. }
+                        if crate::controls::deletion_locked(lock.as_deref()) =>
+                    {
+                        return refuse(id, holds_reason("a deletion-locked content control"));
                     }
                     NodeKind::Opaque {
                         holds: Some(what), ..

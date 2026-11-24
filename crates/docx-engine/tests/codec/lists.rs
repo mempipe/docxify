@@ -197,6 +197,76 @@ fn a_list_in_the_range_is_continued_and_levels_are_kept() {
 }
 
 #[test]
+fn a_list_must_supply_the_requested_marker_at_every_selected_level() {
+    let bytes = lists_with_body(&format!(
+        "{}{}{}",
+        item("Parent", 1, 0),
+        item("Child", 1, 1),
+        item("Neighbour", 2, 0)
+    ));
+    let bytes = with_numbering(&bytes, |xml| {
+        xml.replace(
+            r#"<w:numFmt w:val="bullet"/><w:lvlText w:val="o"/>"#,
+            r#"<w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/>"#,
+        )
+    });
+    for (kind, id, first_format, second_format) in [
+        (ListKind::Bullet, "3", "bullet", "bullet"),
+        (ListKind::Number, "2", "decimal", "lowerLetter"),
+    ] {
+        let mut doc = EditingDocument::open(&bytes).unwrap();
+        assert_eq!(list_of(&doc, "Child"), shown("1", 1, "decimal"));
+        let from = at(text_node(&doc, "Parent"), 0);
+        let to = at(text_node(&doc, "Child"), 1);
+        let command = set_list(from, to, Some(kind));
+        edit(&mut doc, command.clone());
+        edit(&mut doc, command);
+        assert_eq!(list_of(&doc, "Parent"), shown(id, 0, first_format));
+        assert_eq!(list_of(&doc, "Child"), shown(id, 1, second_format));
+        assert_eq!(list_of(&doc, "Neighbour"), shown("2", 0, "decimal"));
+        assert_eq!(lists(&reopen("mixed list", &doc)), lists(&doc));
+        assert_editor_undo("mixed list", &bytes, &mut doc);
+    }
+}
+
+#[test]
+fn list_commands_and_markers_use_the_instance_level_override() {
+    let bytes = lists_with_body(&format!(
+        "{}{}{}",
+        item("Bullet", 2, 0),
+        item("Child", 2, 1),
+        item("Neighbour", 3, 0)
+    ));
+    let bytes = with_numbering(&bytes, |xml| {
+        xml.replace(
+            r#"<w:abstractNumId w:val="20"/></w:num>"#,
+            r#"<w:abstractNumId w:val="20"/>
+               <w:lvlOverride w:ilvl="0">
+                 <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="●"/></w:lvl>
+               </w:lvlOverride>
+               <w:lvlOverride w:ilvl="1"><w:startOverride w:val="3"/></w:lvlOverride>
+               </w:num><w:num w:numId="3"><w:abstractNumId w:val="20"/></w:num>"#,
+        )
+    });
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let markers = |doc: &Document| {
+        doc.paragraphs()
+            .into_iter()
+            .map(|p| doc.inspect_node(p).unwrap().list.unwrap().marker)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(markers(&doc), ["●", "c)", "1."]);
+    let point = at(text_node(&doc, "Bullet"), 0);
+    edit(&mut doc, set_list(point, point, Some(ListKind::Number)));
+    assert_eq!(markers(&doc), ["1.", "c)", "1."]);
+    assert_eq!(
+        markers(&reopen("instance level override", &doc)),
+        markers(&doc)
+    );
+    assert_editor_undo("instance level override", &bytes, &mut doc);
+}
+
+#[test]
 fn a_new_list_follows_the_existing_definitions_and_keeps_levels() {
     let bytes = lists_with_body(&format!("{}{}", item("One", 1, 0), item("Two", 1, 1)));
     let mut doc = EditingDocument::open(&bytes).unwrap();
@@ -469,26 +539,6 @@ fn list_commands_refuse_and_change_nothing() {
 }
 
 #[test]
-fn an_added_list_is_added_once_and_never_over_another() {
-    let mut doc = Document::open(&generated("lists")).unwrap();
-    doc.add_list("7", ListKind::Bullet).unwrap();
-    doc.add_list("7", ListKind::Bullet).unwrap();
-    assert_eq!(
-        doc.added_lists().collect::<Vec<_>>(),
-        [("7", ListKind::Bullet)]
-    );
-    for (num_id, reason) in [
-        ("7", "another kind"),
-        ("1", "already a list in the document"),
-        ("0", "not a positive number"),
-        ("x", "not a positive number"),
-    ] {
-        let error = doc.add_list(num_id, ListKind::Number).expect_err(num_id);
-        assert!(error.to_string().contains(reason), "{num_id}: {error}");
-    }
-}
-
-#[test]
 fn definitions_go_inside_a_numbering_part_whatever_its_shape() {
     for (numbering, label) in [
         (
@@ -624,5 +674,139 @@ fn list_commands_round_trip_through_json_and_are_listed() {
             listed.as_array().unwrap().iter().any(|c| c == name),
             "{name} is not in {listed}"
         );
+    }
+}
+
+/// The `lists` fixture's numbering part, changed.
+fn with_numbering(bytes: &[u8], change: impl Fn(String) -> String) -> Vec<u8> {
+    let xml = change(part(bytes, NUMBERING));
+    rewrite(bytes, NUMBERING, Some(xml.as_bytes()))
+}
+
+#[test]
+fn a_new_list_takes_no_number_the_file_already_names() {
+    // A tracked change remembers list 6, and an instance names definition
+    // 21. The file defines neither, so a new list must not become them.
+    let former = r#"<w:p><w:pPr><w:pPrChange w:id="1" w:author="Bob" w:date="2026-11-01T10:00:00Z"><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="6"/></w:numPr></w:pPr></w:pPrChange></w:pPr><w:r><w:t>Former item</w:t></w:r></w:p>"#;
+    let bytes = lists_with_body(&format!("{former}{}", plain("Plain")));
+    let bytes = with_numbering(&bytes, |xml| {
+        xml.replace(
+            "</w:numbering>",
+            r#"<w:num w:numId="5"><w:abstractNumId w:val="21"/></w:num></w:numbering>"#,
+        )
+    });
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let plain = text_node(&doc, "Plain");
+    edit(
+        &mut doc,
+        set_list(at(plain, 0), at(plain, 0), Some(ListKind::Bullet)),
+    );
+    assert_eq!(list_of(&doc, "Plain"), shown("7", 0, "bullet"));
+    let numbering = part(&doc.export().unwrap(), NUMBERING);
+    assert!(
+        numbering.contains(r#"<w:abstractNum w:abstractNumId="22">"#)
+            && numbering.ends_with(
+                r#"<w:num w:numId="7"><w:abstractNumId w:val="22"/></w:num></w:numbering>"#
+            ),
+        "{numbering}"
+    );
+}
+
+#[test]
+fn list_numbers_stay_within_what_word_reads() {
+    let bytes = with_numbering(&lists_with_body(&plain("Plain")), |xml| {
+        xml.replace(r#"w:numId="2""#, r#"w:numId="2147483647""#)
+            .replace(r#"w:abstractNumId="20""#, r#"w:abstractNumId="2147483647""#)
+            .replace(
+                r#"<w:abstractNumId w:val="20"/>"#,
+                r#"<w:abstractNumId w:val="2147483647"/>"#,
+            )
+    });
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let plain = text_node(&doc, "Plain");
+    edit(
+        &mut doc,
+        set_list(at(plain, 0), at(plain, 0), Some(ListKind::Bullet)),
+    );
+    // Nothing higher fits, so the list and its definition take free numbers.
+    assert_eq!(list_of(&doc, "Plain"), shown("2", 0, "bullet"));
+    let out = doc.export().unwrap();
+    assert_valid("lists", &out);
+    let numbering = part(&out, NUMBERING);
+    assert!(
+        numbering.contains(r#"<w:abstractNum w:abstractNumId="0">"#)
+            && numbering.contains(r#"<w:num w:numId="2"><w:abstractNumId w:val="0"/></w:num>"#),
+        "{numbering}"
+    );
+}
+
+#[test]
+fn a_new_list_leaves_numbers_in_styles_and_compatibility_branches_reserved() {
+    let default_reference = r#"<w:numPr><w:numId w:val="3"/></w:numPr>"#;
+    for (default_numbering, in_choice) in [
+        (
+            default_reference,
+            r#"<w:abstractNum w:abstractNumId="21"/>"#,
+        ),
+        (
+            "",
+            r#"<w:num w:numId="3"><w:abstractNumId w:val="21"/></w:num>"#,
+        ),
+    ] {
+        let bytes = lists_with_body(&plain("Plain"));
+        let styles = part(&bytes, "word/styles.xml").replace(
+            "<w:pPrDefault><w:pPr>",
+            &format!("<w:pPrDefault><w:pPr>{default_numbering}"),
+        );
+        let bytes = rewrite(&bytes, "word/styles.xml", Some(styles.as_bytes()));
+        let bytes = with_numbering(&bytes, |xml| {
+            xml.replace(
+                r#"<w:num w:numId="1">"#,
+                &format!(r#"<mc:AlternateContent><mc:Choice Requires="w14">{in_choice}</mc:Choice><mc:Fallback/></mc:AlternateContent><w:num w:numId="1">"#),
+            )
+        });
+        let mut doc = EditingDocument::open(&bytes).unwrap();
+        let text = text_node(&doc, "Plain");
+        edit(
+            &mut doc,
+            set_list(at(text, 0), at(text, 0), Some(ListKind::Bullet)),
+        );
+        let exported = doc.export().unwrap();
+        let xml = part(&exported, NUMBERING);
+        assert!(xml.contains(in_choice));
+        assert!(xml.contains(r#"<w:num w:numId="4"><w:abstractNumId w:val="22"/></w:num>"#));
+        assert_eq!(
+            list_of(&Document::open(&exported).unwrap(), "Plain"),
+            shown("4", 0, "bullet")
+        );
+    }
+}
+
+#[test]
+fn already_applied_list_settings_leave_undo_empty() {
+    let bytes = lists_with_body(&format!("{}{}", plain("Plain"), item("Bullet", 1, 1)));
+    let mut doc = EditingDocument::open(&bytes).unwrap();
+    let plain = at(text_node(&doc, "Plain"), 0);
+    let bullet = at(text_node(&doc, "Bullet"), 0);
+    for command in [
+        set_list(plain, plain, None),
+        Command::SetNumbering {
+            from: plain,
+            to: plain,
+            numbering: None,
+        },
+        set_list(bullet, bullet, Some(ListKind::Bullet)),
+        Command::SetNumbering {
+            from: bullet,
+            to: bullet,
+            numbering: Some(NumRef {
+                num_id: "1".into(),
+                level: 1,
+            }),
+        },
+    ] {
+        edit(&mut doc, command);
+        assert!(!doc.0.undo());
+        assert_eq!(doc.export().unwrap(), bytes);
     }
 }

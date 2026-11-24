@@ -341,6 +341,14 @@ fn fields_the_engine_cannot_work_out_keep_their_results() {
             r#"<w:sdt><w:sdtPr><w:dataBinding w:xpath="/a[1]" w:storeItemID="{{00000000-0000-0000-0000-000000000001}}"/></w:sdtPr><w:sdtContent><w:p>{}</w:p></w:sdtContent></w:sdt>"#,
             complex("DATE", &["Bound control"])
         ),
+        format!(
+            r#"<w:sdt><w:sdtPr><w15:dataBinding xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" w15:xpath="/a[1]" w15:storeItemID="{{00000000-0000-0000-0000-000000000001}}"/></w:sdtPr><w:sdtContent><w:p>{}</w:p></w:sdtContent></w:sdt>"#,
+            complex("DATE", &["Bound by Word 2013"])
+        ),
+        format!(
+            r#"<w:sdt><w:sdtPr><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="w"><w:lock w:val="contentLocked"/></mc:Choice><mc:Fallback/></mc:AlternateContent></w:sdtPr><w:sdtContent><w:p>{}</w:p></w:sdtContent></w:sdt>"#,
+            complex("DATE", &["Conditional lock"])
+        ),
         format!("<w:p>{}</w:p>", complex("DATE", &["Updated"])),
     ]
     .concat();
@@ -475,6 +483,7 @@ fn a_locked_or_tracked_field_refuses_a_result_and_an_extension_attribute_locks_n
         ),
         r#"<w:p><w:fldSimple w:fldLock = 'true' w:instr=" DATE "><w:r><w:t>Simple locked</w:t></w:r></w:fldSimple></w:p>"#.to_string(),
         r#"<w:p><w:ins w:id="8" w:author="A" w:date="2024-01-01T00:00:00Z"><w:fldSimple w:instr=" DATE "><w:r><w:t>Tracked</w:t></w:r></w:fldSimple></w:ins></w:p>"#.to_string(),
+        r#"<w:p><w:ins w:id="9" w:author="A"><w:sdt><w:sdtContent><w:fldSimple w:instr="DATE"><w:r><w:t>Nested</w:t></w:r></w:fldSimple></w:sdtContent></w:sdt></w:ins></w:p>"#.to_string(),
         format!(
             "<w:p>{}</w:p>",
             complex_with(r#" xmlns:x="urn:extension" x:fldLock="1""#, "DATE", &["Open"])
@@ -500,6 +509,7 @@ fn a_locked_or_tracked_field_refuses_a_result_and_an_extension_attribute_locks_n
         (fields[0], "locked"),
         (fields[1], "locked"),
         (fields[2], "tracked change"),
+        (fields[3], "tracked change"),
     ] {
         let err = doc.run(set(field)).unwrap_err();
         assert!(
@@ -512,9 +522,12 @@ fn a_locked_or_tracked_field_refuses_a_result_and_an_extension_attribute_locks_n
     assert!(doc.dirty_parts().is_empty());
     let updates = doc.field_updates(NOW, None).unwrap();
     assert_eq!(updates.len(), 1, "{updates:?}");
-    assert_eq!(updates[0].field, fields[3]);
-    edit(&mut doc, set(fields[3]));
-    assert_eq!(shown(&doc), ["Locked", "Simple locked", "Tracked", "x"]);
+    assert_eq!(updates[0].field, fields[4]);
+    edit(&mut doc, set(fields[4]));
+    assert_eq!(
+        shown(&doc),
+        ["Locked", "Simple locked", "Tracked", "Nested", "x"]
+    );
 }
 
 #[test]
