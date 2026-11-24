@@ -1,8 +1,26 @@
 # docxify
 
+## The engine
+
+`crates/docx-engine` is the core of a DOCX engine. It opens a DOCX into a document that can be walked, reports what it can and cannot edit, applies edits addressed by node ID, and writes a valid DOCX that keeps everything it did not change. It depends on no WebAssembly or collaboration code.
+
+Print a document's inspection as JSON:
+
+```bash
+cargo run -p docx-engine --example inspect -- fixtures/generated/complex-mixed.docx
+```
+
+Replace a text node's text and write the result. With no node ID it edits the first editable text node:
+
+```bash
+cargo run -p docx-engine --example edit -- in.docx out.docx [node-id] [text]
+```
+
+The rules the engine follows are in the [spec](docs/pipelines/00001-docx-engine-core/spec.md). `fixtures/generated/` holds hand-written test documents, and `fixtures/real-world/` holds documents from real producers, with their [sources and licenses](fixtures/real-world/README.md).
+
 ## Development
 
-docxify is a monorepo. Its first library is the Rust crate `docxify-engine`, in `crates/docxify-engine`. [proto](https://moonrepo.dev/proto) installs the tools, and [moon](https://moonrepo.dev/moon) runs the tasks.
+docxify is a monorepo. [proto](https://moonrepo.dev/proto) installs the tools, and [moon](https://moonrepo.dev/moon) runs the tasks.
 
 [Install proto](https://moonrepo.dev/docs/proto/install), then install the pinned tools:
 
@@ -19,7 +37,7 @@ moon check --all
 Run one task in one project:
 
 ```bash
-moon run docxify-engine:test
+moon run docx-engine:test
 ```
 
 The `format` task only checks. To fix formatting, run `cargo fmt`.
