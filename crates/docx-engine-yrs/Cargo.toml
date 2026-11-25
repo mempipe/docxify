@@ -1,0 +1,18 @@
+[package]
+name = "docx-engine-yrs"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+docx-engine = { path = "../docx-engine" }
+sha2 = "0.10"
+thiserror.workspace = true
+# Exact pin: the update encoding and offset behaviour are what this experiment
+# measured; a minor bump is a reason to re-run it.
+yrs = "=0.28.1"
+
+[dev-dependencies]
+roxmltree.workspace = true
+serde_json.workspace = true
+zip.workspace = true

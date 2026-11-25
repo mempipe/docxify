@@ -30,12 +30,12 @@ Proposed: awaiting operator approval.
 
 Proposed: awaiting operator approval.
 
-- **Headless and shared edits use one command implementation.** `editing::Editor` prepares its writes on a private copy. The replica for shared editing, which has not moved here, prepares the same writes. A refusal leaves live state and undo history untouched. `Document` exposes the projected DOCX for inspection and export.
+- **Headless and shared edits use one command implementation.** `editing::Editor` prepares its writes on a private copy. The replica for shared editing, `docx-engine-yrs`, prepares the same writes. A refusal leaves live state and undo history untouched. `Document` exposes the projected DOCX for inspection and export.
 - **A command on anything that is not editable is refused.** A read-only or opaque node may be removed whole, never changed inside.
 - **A place in text is a text node's ID and offsets in Unicode scalar values,** so no range can cut a character in two.
 - **Undo belongs to the editing session.** A split keeps the first half's identity. Splits and merges refuse edits that would discard protected content.
 - **Built:** typing, line breaks, splitting and merging paragraphs, removing items, replacing a range across paragraphs, bold, italic and underline, paragraph styles, lists, links, table rows and columns, pictures, tracked typing, comments and replies, filling content controls, and updating fields on command and on open.
-- **A refusal settles one person's command on one document.** It is never how a merge of two people's edits is settled. The rules for that move here with the replica.
+- **A refusal settles one person's command on one document.** It is never how a merge of two people's edits is settled. The rules for that are in [00002](../00002-docx-engine-replica/spec.md).
 
 ### D3 — Tracked changes and comments are content
 
@@ -109,7 +109,7 @@ What would overturn this: a defect that a debug assertion would have caught and 
 
 Each of these waits for the condition named.
 
-- **The replica, the WebAssembly bindings and the browser editor.** Each waits for the operator to ask for its move. The WebAssembly bindings depend on the replica, and the editor depends on both.
+- **The WebAssembly bindings and the browser editor.** Each moves in its own pull request, in that order. The replica moved in [00002](../00002-docx-engine-replica/spec.md). The WebAssembly bindings depend on it, and the editor depends on both.
 - **The prototype's README and scripts.** The README documents every part, so it moves when the parts it describes are here. Until then this repository's README names the crate and how to run it.
 - **A license field on the crate.** It waits for the crate to be published to a registry.
 - **Continuous integration.** Nothing runs the checks on a pull request. It waits for the operator to ask for it.
