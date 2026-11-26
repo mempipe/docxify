@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DOCX Engine Demo</title>
+    <style>
+      body { margin: 0; font: 14px system-ui, sans-serif; background: #e9e9ec; color: #222; }
+      .bar { position: sticky; top: 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 16px; background: #fff; border-bottom: 1px solid #ccc; z-index: 1; }
+      #hint { flex: 1 1 240px; }
+      #summary { color: #666; font-size: 12px; }
+      #name { width: 9em; }
+      #style { max-width: 12em; }
+      .format { min-width: 2em; }
+      .format[aria-pressed="true"] { background: #d0d7de; }
+      #people { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; }
+      #people:empty { display: none; }
+      .person::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 4px; border-radius: 50%; background: var(--color); }
+      #notice { flex-basis: 100%; color: #9a6700; font-size: 12px; }
+      #notice:empty { display: none; }
+      #view { padding: 0 16px; overflow-x: auto; }
+      #status:empty { display: none; }
+      #status { margin: 16px; padding: 8px; background: #fff; font-size: 12px; white-space: pre-wrap; }
+      #linkbar { position: absolute; z-index: 2; display: flex; gap: 6px; align-items: center; max-width: min(28em, calc(100vw - 32px)); padding: 6px 8px; background: #fff; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 2px 8px rgb(0 0 0 / 15%); font-size: 13px; }
+      #linkbar[hidden], #linkbar form[hidden], #linkbar span[hidden] { display: none; }
+      #linkbar form, #linkbar span { display: flex; gap: 6px; align-items: center; min-width: 0; }
+      #linkurl { width: 18em; min-width: 0; }
+      #linkopen { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 18em; }
+      #commentbar { position: absolute; z-index: 2; display: flex; gap: 6px; align-items: flex-end; max-width: calc(100vw - 32px); padding: 6px 8px; background: #fff; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 2px 8px rgb(0 0 0 / 15%); }
+      #commentbar[hidden] { display: none; }
+      #commenttext { width: 18em; min-width: 0; font: inherit; resize: vertical; }
+      #fillbar { position: absolute; z-index: 2; display: flex; gap: 6px; align-items: flex-end; max-width: calc(100vw - 32px); padding: 6px 8px; background: #fff; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 2px 8px rgb(0 0 0 / 15%); }
+      #fillbar[hidden] { display: none; }
+      #fillfield > * { width: 16em; min-width: 0; max-width: 100%; font: inherit; }
+      #tablebar { display: flex; flex-wrap: wrap; gap: 4px; }
+      #tablebar[hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <input id="file" disabled type="file" accept=".docx" />
+      <span id="hint">Type to edit. Enter, Backspace and Delete change paragraphs. ⌘B, ⌘I and ⌘U format a selection. ⌘⌥1 to ⌘⌥3 give headings, ⌘⌥0 the default style. ⌘⇧8 and ⌘⇧7 make bullets and numbering, and Tab and Shift+Tab change a list item's level. ⌘K links a selection, and ⌘-click opens a link. ⌘⌥M comments on a selection or the word at the caret, and Reply in a comment's balloon answers it. Clicking a form field fills it in, and a check box ticks or clears. Picture, or pasting an image, puts a picture at the caret. In a table, the table buttons add and delete rows and columns. Track changes records typing and deleting under your name. Update fields on open asks Word to update fields, such as a table of contents, when it opens the downloaded file. ⌘Z or Ctrl+Z undoes.</span>
+      <select id="style" aria-label="Paragraph style" title="Paragraph style (⌘⌥0 to ⌘⌥3)"></select>
+      <button id="bold" class="format" aria-pressed="false" title="Bold (⌘B)"><b>B</b></button>
+      <button id="italic" class="format" aria-pressed="false" title="Italic (⌘I)"><i>I</i></button>
+      <button id="underline" class="format" aria-pressed="false" title="Underline (⌘U)"><u>U</u></button>
+      <button id="bullet" class="format" aria-pressed="false" title="Bullets (⌘⇧8)">•≡</button>
+      <button id="number" class="format" aria-pressed="false" title="Numbering (⌘⇧7)">1≡</button>
+      <button id="link" class="format" aria-pressed="false" title="Link (⌘K)">🔗</button>
+      <button id="comment" title="Comment (⌘⌥M)">Comment</button>
+      <button id="picture" title="Insert a picture">Picture</button>
+      <input id="pictures" type="file" accept="image/png,image/jpeg,image/gif" hidden />
+      <button id="track" class="format" aria-pressed="false" title="Record typing and deleting as tracked changes">Track changes</button>
+      <span id="tablebar" role="group" aria-label="Table" hidden>
+        <button id="row_above" title="Insert a row above">Row above</button>
+        <button id="row_below" title="Insert a row below">Row below</button>
+        <button id="column_left" title="Insert a column to the left">Column left</button>
+        <button id="column_right" title="Insert a column to the right">Column right</button>
+        <button id="remove_row" title="Delete the row">Delete row</button>
+        <button id="remove_column" title="Delete the column">Delete column</button>
+        <button id="remove_table" title="Delete the table">Delete table</button>
+      </span>
+      <input id="name" type="text" maxlength="40" aria-label="Your name" title="Your name, on your tracked changes and your caret" />
+      <span id="people"></span>
+      <button id="refreshfields" title="Update the fields, such as dates and the page numbers in a table of contents, as Word does when every field is selected and updated">Update fields</button>
+      <button id="updatefields" class="format" aria-pressed="false" title="Ask Word to update fields, such as a table of contents, when it opens the file">Update fields on open</button>
+      <button id="download">Download DOCX</button>
+      <span id="summary"></span>
+      <span id="notice" role="status"></span>
+    </div>
+    <div id="view"></div>
+    <div id="linkbar" hidden>
+      <form id="linkform" hidden>
+        <input id="linkurl" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="Paste or type a link" aria-label="Link address" />
+        <button id="linkapply" type="submit">Apply</button>
+      </form>
+      <span id="linkview" hidden>
+        <a id="linkopen" target="_blank" rel="noopener noreferrer"></a>
+        <button id="linkedit" type="button">Edit</button>
+        <button id="linkremove" type="button">Remove</button>
+      </span>
+    </div>
+    <form id="commentbar" hidden>
+      <textarea id="commenttext" rows="2" placeholder="Add a comment" aria-label="Comment"></textarea>
+      <button id="commentpost" type="submit">Post</button>
+    </form>
+    <form id="fillbar" hidden>
+      <span id="fillfield"></span>
+      <button id="fillapply" type="submit">Fill</button>
+    </form>
+    <pre id="status"></pre>
+    <script>
+      // A phone has no console, so a failure is shown on the page.
+      const showError = (message) => (document.getElementById("status").textContent = `Error: ${message}`);
+      addEventListener("error", (event) => showError(event.message));
+      addEventListener("unhandledrejection", (event) => showError(event.reason?.message ?? event.reason));
+    </script>
+    <script type="importmap">
+      {
+        "imports": {
+          "orderedmap": "./node_modules/orderedmap/dist/index.js",
+          "prosemirror-commands": "./node_modules/prosemirror-commands/dist/index.js",
+          "prosemirror-keymap": "./node_modules/prosemirror-keymap/dist/index.js",
+          "prosemirror-model": "./node_modules/prosemirror-model/dist/index.js",
+          "prosemirror-state": "./node_modules/prosemirror-state/dist/index.js",
+          "prosemirror-transform": "./node_modules/prosemirror-transform/dist/index.js",
+          "prosemirror-view": "./node_modules/prosemirror-view/dist/index.js",
+          "w3c-keyname": "./node_modules/w3c-keyname/index.js"
+        }
+      }
+    </script>
+    <script type="module" src="./dist/browser-demo.js"></script>
+  </body>
+</html>

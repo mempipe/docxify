@@ -2,3 +2,6 @@
 # Run `proto use` to install them. The Rust version is in rust-toolchain.toml.
 
 moon = "2.6.5"
+# The demo in apps/demo runs its TypeScript directly in Node.
+node = "26.13.1"
+pnpm = "11.17.0"

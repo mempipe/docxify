@@ -42,6 +42,21 @@ cargo build -p docx-engine-wasm --target wasm32-unknown-unknown --profile wasm
 
 It is written to `target/wasm32-unknown-unknown/wasm/docx_engine_wasm.wasm`. To use it from JavaScript, generate the glue with `wasm-bindgen-cli` at the version in `Cargo.lock`. The details are in the [bindings' spec](docs/pipelines/00003-docx-engine-wasm/spec.md).
 
+## The demo
+
+`apps/demo` is a browser editor built on the engine. It shows a DOCX on pages, as Word lays it out, and you edit on the pages, alone or with others.
+
+Build it, then start its server:
+
+```bash
+moon run demo:build
+cd apps/demo && node web/collab-server.ts
+```
+
+Open `http://127.0.0.1:8766/web/index.html` to edit alone, or add `?collab` to share the document. The demo has no sign-in and no storage, and anyone who can reach the port can read and edit every document on it.
+
+The [demo's README](apps/demo/README.md) says what the editor does and how to check it. The rules it follows are in the [demo's spec](docs/pipelines/00004-docx-engine-demo/spec.md).
+
 ## Development
 
 docxify is a monorepo. [proto](https://moonrepo.dev/proto) installs the tools, and [moon](https://moonrepo.dev/moon) runs the tasks.
@@ -52,7 +67,7 @@ docxify is a monorepo. [proto](https://moonrepo.dev/proto) installs the tools, a
 proto use
 ```
 
-Check everything. This checks formatting, lints and tests every crate, and checks that each builds for WebAssembly:
+Check everything. This checks formatting, lints and tests every crate, and checks that each builds for WebAssembly. It also builds the demo and runs its checks that need no browser:
 
 ```bash
 moon check --all
@@ -64,10 +79,10 @@ Run one task in one project:
 moon run docx-engine:test
 ```
 
-The first run downloads the WebAssembly target that `rust-toolchain.toml` names. If a task fails while rustup downloads it, run the check again.
+The first run downloads the WebAssembly target that `rust-toolchain.toml` names. If a task fails while rustup downloads it, run the check again. The first run also installs the demo's npm packages and `wasm-bindgen-cli`, so it needs a network.
 
 The `format` task only checks. To fix formatting, run `cargo fmt`.
 
-Tool versions are in `.prototools` and `rust-toolchain.toml`. Tasks are in `.moon/tasks`. A new crate under `crates/` gets the same tasks with no moon configuration of its own.
+Tool versions are in `.prototools` and `rust-toolchain.toml`. The crates' tasks are in `.moon/tasks`. A new crate under `crates/` gets the same tasks with no moon configuration of its own. The demo's tasks are in `apps/demo/moon.yml`.
 
 Shared test fixtures go in `fixtures/` at the root. moon replays a cached result unless an input changed, and every crate's tasks take all of `crates/` and `fixtures/` as inputs. Test data kept anywhere else must be added to the inputs in `.moon/tasks/rust.yml`.
