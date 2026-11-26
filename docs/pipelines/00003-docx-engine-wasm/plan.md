@@ -22,7 +22,7 @@ Verified on macOS, by the command named:
 | The `wasm` task can fail | A temporary `compile_error!` on `wasm32` only in the core, then `moon run docx-engine:wasm docx-engine-wasm:wasm` | The bindings' task failed with exit code 101. The line is not in the branch, and the core's hash was checked again after it was removed |
 | The module builds | The build command in D5 | Wrote the module, 3,546 KiB raw and 897 KiB with gzip |
 | The bindings work from JavaScript | `wasm-bindgen --target nodejs` 0.2.130 on the module, then a script in Node 22 on `fixtures/generated/simple-paragraphs.docx` | Two replicas each inserted text, exchanged updates and exported the same bytes. The export validated, and `DocxDocument` read "Alice Bob First paragraph." from it. A command naming a missing node threw "no node n999999". Undo took back only the first replica's text |
-| A fresh clone works | `proto use`, then `moon check --all`, in a new clone of the branch | Pass, with a clean tree afterwards |
+| A fresh clone works | `proto use`, then `moon check --all`, in a new clone of the branch, with the target removed first by `rustup target remove wasm32-unknown-unknown --toolchain 1.100.0` | The first run failed one task, `docx-engine-yrs:wasm`, in rustup's concurrent download of the target (D4). The target was installed, and a second run passed all 12 tasks with a clean tree afterwards |
 
 The Node script was a one-off check. It is not in the branch, because the editor's Node demo covers the same ground and moves next.
 
@@ -30,7 +30,7 @@ Asserted, not verified here:
 
 - D1 restates what the crate's code and documentation say. The Node script exercised part of it.
 - The module was not loaded in a browser.
-- Linux, Windows and a machine with none of the tools installed are untested. The target was already installed on the machine used.
+- Linux, Windows and a machine with none of the tools installed are untested.
 
 ## Next
 

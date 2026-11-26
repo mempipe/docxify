@@ -67,7 +67,8 @@ The task can fail. A `compile_error!` that applies only on `wasm32`, added to th
 
 Costs:
 
-- Each contributor downloads the target once.
+- Each contributor downloads the target once. `proto use` installs the toolchain but not its targets, so the first Cargo command downloads it. Until then, every Cargo command in the repository waits, even `cargo fmt`.
+- The first `moon check --all` after that can fail once. moon starts the tasks together, and each asks rustup for the missing target. In a fresh clone with the target removed, one task failed because rustup "could not rename 'downloaded' file", while another installed the target. Running the check again passed. This is tolerated: it happens once per machine, the error names rustup, and running again recovers.
 - The first check on this machine took 14 s for the core, 4 s for the replica and 3 s for the bindings. Each was timed once, on a machine doing other work.
 
 What would overturn this: code that is specific to one target, which needs a build or a test on `wasm32` instead of a check.

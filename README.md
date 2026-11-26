@@ -64,6 +64,8 @@ Run one task in one project:
 moon run docx-engine:test
 ```
 
+The first run downloads the WebAssembly target that `rust-toolchain.toml` names. If a task fails while rustup downloads it, run the check again.
+
 The `format` task only checks. To fix formatting, run `cargo fmt`.
 
 Tool versions are in `.prototools` and `rust-toolchain.toml`. Tasks are in `.moon/tasks`. A new crate under `crates/` gets the same tasks with no moon configuration of its own.
