@@ -32,3 +32,10 @@ tasks:
     command: 'cargo test --release'
     inputs:
       - '@group(sources)'
+
+  wasm:
+    # Every crate builds for the browser: the WebAssembly bindings depend on
+    # the others. A check is enough, because no crate has target-specific code.
+    command: 'cargo check --target wasm32-unknown-unknown'
+    inputs:
+      - '@group(sources)'

@@ -17,3 +17,11 @@ thiserror = "2"
 # Only DEFLATE, through flate2's pure-Rust backend, so the core builds for
 # wasm32-unknown-unknown with no C toolchain. DOCX packages use no other method.
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# For the WebAssembly module, which a browser downloads, so size comes first.
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

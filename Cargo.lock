@@ -146,6 +146,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "docx-engine-wasm"
+version = "0.0.0"
+dependencies = [
+ "docx-engine",
+ "docx-engine-yrs",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "docx-engine-yrs"
 version = "0.0.0"
 dependencies = [
