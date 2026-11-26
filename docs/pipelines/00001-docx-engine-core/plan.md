@@ -31,6 +31,6 @@ Asserted, not verified here:
 
 ## Next
 
-The replica for shared editing moved in pipeline 00002, and the WebAssembly bindings in pipeline 00003. The browser editor has not moved. It depends on both.
+The replica for shared editing moved in pipeline 00002, the WebAssembly bindings in pipeline 00003, and the browser editor in pipeline 00004.
 
-While the prototype keeps changing, the core here falls behind it. Bringing it up to date is the same copy at a newer revision, with new hashes in D4. The replica and the bindings are copied at the same revision, as 00002 D4 and 00003 D2 say.
+While the prototype keeps changing, the core here falls behind it. Bringing it up to date is the same copy at a newer revision, with new hashes in D4. The replica, the bindings and the demo are copied at the same revision, as 00002 D4, 00003 D2 and 00004 D3 say.

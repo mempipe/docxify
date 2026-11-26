@@ -223,7 +223,7 @@ The shared tasks need no change. A crate under `crates/` inherits them, and 0000
 
 Each of these waits for the condition named.
 
-- **The browser editor.** It moves in its own pull request. The WebAssembly bindings moved in [00003](../00003-docx-engine-wasm/spec.md). The editor depends on them, and they depend on this crate.
 - **Rules for storing a shared session.** The prototype has rules for what is stored and how updates are compacted. Nothing in this repository stores a session, so they wait for the first part that does.
-- **Rules for how an edit's cost is bounded while redrawing.** They describe the editor, and move with it.
+
+The WebAssembly bindings moved in [00003](../00003-docx-engine-wasm/spec.md), and the browser editor in [00004](../00004-docx-engine-demo/spec.md). The rules for how an edit's cost is bounded while redrawing are 00004 D2.
 - **Continuous integration.** Nothing runs the checks on a pull request. It waits for the operator to ask for it.

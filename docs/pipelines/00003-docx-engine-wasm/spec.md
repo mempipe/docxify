@@ -99,7 +99,6 @@ The prototype's `[profile.release]` sets `opt-level = 3`, which is Cargo's defau
 
 Each of these waits for the condition named.
 
-- **The JavaScript glue and the browser editor.** `wasm-bindgen-cli` turns the module into a JavaScript package. The editor's build runs it, so it moves with the editor, in the next pull request.
-- **Tests for the bindings.** The crate has none of its own. In the prototype the editor's Node demo and its browser checks exercise them, and those move with the editor.
+- **Tests in the crate.** It has none of its own. The demo's checks exercise the bindings, in Node and in Chrome. They moved in [00004](../00004-docx-engine-demo/spec.md), and so did the build that runs `wasm-bindgen-cli`.
 - **An npm package.** It waits for the bindings to be published.
 - **Continuous integration.** Nothing runs the checks on a pull request. It waits for the operator to ask for it.
