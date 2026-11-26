@@ -109,7 +109,7 @@ What would overturn this: a defect that a debug assertion would have caught and 
 
 Each of these waits for the condition named.
 
-- **The WebAssembly bindings and the browser editor.** Each moves in its own pull request, in that order. The replica moved in [00002](../00002-docx-engine-replica/spec.md). The WebAssembly bindings depend on it, and the editor depends on both.
+- **The browser editor.** It moves in its own pull request. The replica moved in [00002](../00002-docx-engine-replica/spec.md), and the WebAssembly bindings in [00003](../00003-docx-engine-wasm/spec.md). The editor depends on both.
 - **The prototype's README and scripts.** The README documents every part, so it moves when the parts it describes are here. Until then this repository's README names the crate and how to run it.
 - **A license field on the crate.** It waits for the crate to be published to a registry.
 - **Continuous integration.** Nothing runs the checks on a pull request. It waits for the operator to ask for it.

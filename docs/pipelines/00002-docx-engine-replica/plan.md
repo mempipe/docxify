@@ -35,6 +35,6 @@ Asserted, not verified here:
 
 ## Next
 
-The WebAssembly bindings move next, then the browser editor. Each is its own pull request.
+The WebAssembly bindings moved in pipeline 00003. The browser editor moves next, in its own pull request.
 
-While the prototype keeps changing, the crates here fall behind it. Bringing them up to date is one copy of both crates and the fixtures at a newer revision, with new hashes in D4 here and in 00001 D4.
+While the prototype keeps changing, the crates here fall behind it. Bringing them up to date is one copy of every crate and the fixtures at a newer revision, with new hashes in D4 here, in 00001 D4 and in 00003 D2.
