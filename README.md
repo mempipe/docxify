@@ -18,6 +18,18 @@ cargo run -p docx-engine --example edit -- in.docx out.docx [node-id] [text]
 
 The rules the engine follows are in the [spec](docs/pipelines/00001-docx-engine-core/spec.md). `fixtures/generated/` holds hand-written test documents, and `fixtures/real-world/` holds documents from real producers, with their [sources and licenses](fixtures/real-world/README.md).
 
+### Shared editing
+
+`crates/docx-engine-yrs` lets several people edit one document. Each person has a replica, which keeps the core's editing state in [Yrs](https://github.com/y-crdt/y-crdt). Replicas exchange updates, and each derives the same document. Undo takes back a person's own changes.
+
+Run two replicas that edit at the same time, converge and export a DOCX:
+
+```bash
+cargo run --release -p docx-engine-yrs --example collab -- fixtures/generated/simple-paragraphs.docx out.docx
+```
+
+The rules for merging are in the [replica's spec](docs/pipelines/00002-docx-engine-replica/spec.md). The crate does no networking. The caller carries each replica's updates to the others.
+
 ## Development
 
 docxify is a monorepo. [proto](https://moonrepo.dev/proto) installs the tools, and [moon](https://moonrepo.dev/moon) runs the tasks.

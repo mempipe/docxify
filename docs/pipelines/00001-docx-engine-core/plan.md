@@ -31,6 +31,6 @@ Asserted, not verified here:
 
 ## Next
 
-The replica for shared editing, the WebAssembly bindings and the browser editor have not moved. Each is a later piece of work, in that order, because each depends on the one before.
+The replica for shared editing moved in pipeline 00002. The WebAssembly bindings and the browser editor have not moved. Each is a later piece of work, in that order, because each depends on the one before.
 
-While the prototype keeps changing, the core here falls behind it. Bringing it up to date is the same copy at a newer revision, with new hashes in D4.
+While the prototype keeps changing, the core here falls behind it. Bringing it up to date is the same copy at a newer revision, with new hashes in D4. The replica is copied at the same revision, as 00002 D4 says.
