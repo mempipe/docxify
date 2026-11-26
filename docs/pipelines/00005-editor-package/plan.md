@@ -28,6 +28,7 @@ Verified on macOS, by the command named:
 | The server serves what the page asks for | `curl` on the demo's server | 200 for the page, the bundle, `dist/editor.js`, the WebAssembly file, a font stylesheet and a font file through pnpm's links, and a fixture |
 | A type error fails the build | A temporary line with a type error in `src/measure.ts`, then `moon run editor:build` | The task failed with the compiler's error. The line is not in the branch |
 | The package's declarations work for a user | The TypeScript compiler on `apps/demo/web/browser-demo.ts`, strict, against the package | No errors. This was run once by hand and is not a task |
+| A fresh clone works | `proto use`, `moon check --all`, then `moon run demo:browser`, in a new clone of the branch | All 21 tasks pass in 74 s, with a clean tree afterwards. The browser check passed there too |
 
 Asserted, not verified here:
 
