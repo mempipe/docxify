@@ -25,6 +25,8 @@ Verified on macOS, by the command named:
 | Editing in a browser | `moon run demo:browser`, in headless Chrome | 1,717 checks in 17 features, none failed, in 61 s. Each feature ran alone and in two tabs sharing a room |
 | The `test` and `types` tasks can fail | A temporary failing test, and a temporary line in `web/wire.generated.ts` | Each task failed. Neither change is in the branch, and the `web` hash was checked again after they were removed |
 | A script reads the links from the shell | `scripts/check-with-python-docx.sh`, with uv | Every fixture passed |
+| The tool install works from nothing | `cargo install --locked wasm-bindgen-cli --version 0.2.130 --root` a scratch directory | Built and installed in 29 s. The installed `wasm-bindgen` reported 0.2.130 |
+| A fresh clone works | `proto use`, then `moon check --all`, in a new clone of the branch | All 19 tasks pass in 71 s, with a clean tree afterwards. `apps/demo/target` pointed at nothing until Cargo built. `demo:tools` found `wasm-bindgen-cli` already installed on this machine |
 
 Asserted, not verified here:
 
