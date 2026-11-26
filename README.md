@@ -42,9 +42,13 @@ cargo build -p docx-engine-wasm --target wasm32-unknown-unknown --profile wasm
 
 It is written to `target/wasm32-unknown-unknown/wasm/docx_engine_wasm.wasm`. To use it from JavaScript, generate the glue with `wasm-bindgen-cli` at the version in `Cargo.lock`. The details are in the [bindings' spec](docs/pipelines/00003-docx-engine-wasm/spec.md).
 
+## The editor
+
+`packages/editor` is the browser editor, as the package `@mempipe/docxify-editor`. It wraps the WebAssembly module, lays a DOCX out on pages as Word does, and lets people edit on the pages, alone or with others. It is not published to a registry. The [package's README](packages/editor/README.md) lists its modules and what a host page must provide.
+
 ## The demo
 
-`apps/demo` is a browser editor built on the engine. It shows a DOCX on pages, as Word lays it out, and you edit on the pages, alone or with others.
+`apps/demo` is a page that uses the editor package, with a collaboration server.
 
 Build it, then start its server:
 
@@ -55,7 +59,7 @@ cd apps/demo && node web/collab-server.ts
 
 Open `http://127.0.0.1:8766/web/index.html` to edit alone, or add `?collab` to share the document. The demo has no sign-in and no storage, and anyone who can reach the port can read and edit every document on it.
 
-The [demo's README](apps/demo/README.md) says what the editor does and how to check it. The rules it follows are in the [demo's spec](docs/pipelines/00004-docx-engine-demo/spec.md).
+The [demo's README](apps/demo/README.md) says what the editor does and how to check it. The editor's rules are in the [demo's spec](docs/pipelines/00004-docx-engine-demo/spec.md), and how the package is cut out of the demo is in the [package's spec](docs/pipelines/00005-editor-package/spec.md).
 
 ## Development
 
@@ -67,7 +71,7 @@ docxify is a monorepo. [proto](https://moonrepo.dev/proto) installs the tools, a
 proto use
 ```
 
-Check everything. This checks formatting, lints and tests every crate, and checks that each builds for WebAssembly. It also builds the demo and runs its checks that need no browser:
+Check everything. This checks formatting, lints and tests every crate, and checks that each builds for WebAssembly. It also builds the editor package and the demo, and runs their checks that need no browser:
 
 ```bash
 moon check --all
@@ -79,10 +83,10 @@ Run one task in one project:
 moon run docx-engine:test
 ```
 
-The first run downloads the WebAssembly target that `rust-toolchain.toml` names. If a task fails while rustup downloads it, run the check again. The first run also installs the demo's npm packages and `wasm-bindgen-cli`, so it needs a network.
+The first run downloads the WebAssembly target that `rust-toolchain.toml` names. If a task fails while rustup downloads it, run the check again. The first run also installs the npm packages and `wasm-bindgen-cli`, so it needs a network.
 
 The `format` task only checks. To fix formatting, run `cargo fmt`.
 
-Tool versions are in `.prototools` and `rust-toolchain.toml`. The crates' tasks are in `.moon/tasks`. A new crate under `crates/` gets the same tasks with no moon configuration of its own. The demo's tasks are in `apps/demo/moon.yml`.
+Tool versions are in `.prototools` and `rust-toolchain.toml`. The crates' tasks are in `.moon/tasks`. A new crate under `crates/` gets the same tasks with no moon configuration of its own. The editor's tasks are in `packages/editor/moon.yml`, and the demo's in `apps/demo/moon.yml`. The npm packages of both are one pnpm workspace, locked by `pnpm-lock.yaml` at the root.
 
 Shared test fixtures go in `fixtures/` at the root. moon replays a cached result unless an input changed, and every crate's tasks take all of `crates/` and `fixtures/` as inputs. Test data kept anywhere else must be added to the inputs in `.moon/tasks/rust.yml`.

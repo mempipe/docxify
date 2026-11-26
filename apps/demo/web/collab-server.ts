@@ -21,14 +21,14 @@ import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import * as Y from "yjs";
-import { SEEDER } from "./collab.ts";
-import { loadDocxEngine } from "./engine.ts";
+import { SEEDER } from "@mempipe/docxify-editor/collab";
+import { loadDocxEngine } from "@mempipe/docxify-editor/engine";
 
 const { values } = parseArgs({
   options: { host: { type: "string", default: "127.0.0.1" }, port: { type: "string", default: "8766" } },
 });
 const root = fileURLToPath(new URL("..", import.meta.url));
-const wasm = await readFile(join(root, "web/pkg/docx_engine_wasm_bg.wasm"));
+const wasm = await readFile(fileURLToPath(import.meta.resolve("@mempipe/docxify-editor/docx_engine_wasm_bg.wasm")));
 const engine = await loadDocxEngine(wasm);
 
 const MAX_UPLOAD = 32 * 1024 * 1024;

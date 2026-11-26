@@ -1,50 +1,44 @@
-// Build the WASM package and the browser bundle.
+// Build the browser bundle.
 //
 //   node web/build.mjs
 //
-// Needs the wasm32-unknown-unknown target and wasm-bindgen-cli at the
-// version in Cargo.lock. Writes web/pkg/ (wasm-bindgen output) and web/dist/
-// (the TypeScript modules with types stripped by Node, for the browser, and
-// one esbuild bundle of the collaboration libraries).
+// Needs a built @mempipe/docxify-editor. Writes web/dist/: the page's script
+// bundled with the editor, and the WebAssembly module beside it, where the
+// engine looks for it.
 
-import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { stripTypeScriptTypes } from "node:module";
+import { copyFileSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { build } from "esbuild";
 
 const web = dirname(fileURLToPath(import.meta.url));
-const root = join(web, "..");
-const run = (cmd, args) => execFileSync(cmd, args, { cwd: root, stdio: "inherit" });
+const dist = join(web, "dist");
 
-run("cargo", ["build", "-p", "docx-engine-wasm", "--target", "wasm32-unknown-unknown", "--profile", "wasm"]);
-const wasm = join(root, "target/wasm32-unknown-unknown/wasm/docx_engine_wasm.wasm");
-run("wasm-bindgen", ["--target", "web", "--out-dir", join(web, "pkg"), wasm]);
-
-mkdirSync(join(web, "dist"), { recursive: true });
-const unstripped = ["node-demo.ts", "collab-check.ts", "collab-server.ts", "collab-deps.ts"];
-for (const file of readdirSync(web).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts") && !unstripped.includes(f))) {
-  const js = stripTypeScriptTypes(readFileSync(join(web, file), "utf8"))
-    .replace(/from "(\.\/[^"]+)\.ts"/g, 'from "$1.js"')
-    .replace(/from "\.\/pkg\//g, 'from "../pkg/');
-  writeFileSync(join(web, "dist", file.replace(/\.ts$/, ".js")), js);
-}
-
+rmSync(dist, { recursive: true, force: true });
 await build({
-  entryPoints: [join(web, "collab-deps.ts")],
-  outfile: join(web, "dist/collab-deps.js"),
+  // The browser checks import ./dist/editor.js in the page to call one of the
+  // editor's functions, so the editor is an entry too. Splitting gives the
+  // two entries one copy of everything they share.
+  entryPoints: [
+    { in: join(web, "browser-demo.ts"), out: "browser-demo" },
+    { in: "@mempipe/docxify-editor/editor", out: "editor" },
+  ],
+  absWorkingDir: web,
+  outdir: dist,
   bundle: true,
+  splitting: true,
   format: "esm",
-  minify: true,
   logLevel: "warning",
 });
+copyFileSync(
+  fileURLToPath(import.meta.resolve("@mempipe/docxify-editor/docx_engine_wasm_bg.wasm")),
+  join(dist, "docx_engine_wasm_bg.wasm"),
+);
 
 const size = (path) => {
   const bytes = readFileSync(path);
   return `${(statSync(path).size / 1024).toFixed(0)} KiB raw, ${(gzipSync(bytes, { level: 9 }).length / 1024).toFixed(0)} KiB gzip`;
 };
-console.log(`docx_engine_wasm_bg.wasm: ${size(join(web, "pkg/docx_engine_wasm_bg.wasm"))}`);
-console.log(`docx_engine_wasm.js: ${size(join(web, "pkg/docx_engine_wasm.js"))}`);
-console.log(`collab-deps.js: ${size(join(web, "dist/collab-deps.js"))}`);
+console.log(`docx_engine_wasm_bg.wasm: ${size(join(dist, "docx_engine_wasm_bg.wasm"))}`);
+console.log(`browser-demo.js: ${size(join(dist, "browser-demo.js"))}`);

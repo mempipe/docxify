@@ -1,16 +1,16 @@
 # The demo
 
-A browser editor for DOCX, built on the engine through its WebAssembly bindings. It shows a document on pages, as Word lays it out, and you edit on the pages. One person can edit alone, or several can edit one document together.
+A browser editor for DOCX, built on the engine through its WebAssembly bindings. The editor itself is the package [`@mempipe/docxify-editor`](../../packages/editor/README.md), and this is a page that uses it. It shows a document on pages, as Word lays it out, and you edit on the pages. One person can edit alone, or several can edit one document together.
 
 It is a demo. It has no sign-in and no storage, and it was tried in headless Chrome only.
 
 | Path | What it is |
 | --- | --- |
-| `web/` | The TypeScript wrapper for the engine, the page layout, the editing surface, the demo page, and the collaboration server and client |
+| `web/` | The demo page, the collaboration server, and two Node programs that check the editor |
 | `scripts/` | Checks that drive the demo in headless Chrome, and comparisons with Word and python-docx |
 | `fixtures`, `target` | Links to the repository's `fixtures/` and to Cargo's `target/` |
 
-`web/` and `scripts/` are the prototype's files, unchanged. They expect to be run from this directory, with `fixtures/` and `target/` beside them. That is why the two links exist. Some comments in them give paths in the prototype's own repository. Read those as relative to this directory.
+`scripts/` is the prototype's, unchanged. `web/` holds the prototype's files that are not the editor, edited to import the package. Both expect to be run from this directory, with `fixtures/` and `target/` beside them. That is why the two links exist. Some comments in them give paths in the prototype's own repository. Read those as relative to this directory.
 
 ## Running it
 
@@ -20,7 +20,7 @@ It is a demo. It has no sign-in and no storage, and it was tried in headless Chr
 moon run demo:build
 ```
 
-This installs the packages in `web/`, installs `wasm-bindgen-cli`, builds the WebAssembly module, and writes `web/pkg/` and `web/dist/`.
+This installs the npm packages and `wasm-bindgen-cli`, builds the editor package with its WebAssembly module, and bundles the page into `web/dist/`.
 
 Everything below runs from this directory, `apps/demo`.
 
@@ -38,7 +38,7 @@ Type in the text, and press Download DOCX. Use `?fixture=real-world/python-docx.
 
 The page shows the document on pages, laid out as Word lays it out, and you edit on the pages. Click to place the caret, and drag or Shift+click to select. Up and Down move by the lines on the page. Double-click a header or footer to edit it, and double-click the body to go back.
 
-Each story keeps a hidden ProseMirror view (`web/editor.ts`) that takes the keyboard. ProseMirror never holds the document. Its state is a view built from the inspection, and each character carries a `leaf` mark naming its engine text node. Every edit becomes engine commands first, and the commands go to a replica of the document's editing state, whether one person edits or several:
+Each story keeps a hidden ProseMirror view (the package's `editor` module) that takes the keyboard. ProseMirror never holds the document. Its state is a view built from the inspection, and each character carries a `leaf` mark naming its engine text node. Every edit becomes engine commands first, and the commands go to a replica of the document's editing state, whether one person edits or several:
 
 - Typing sends one `ReplaceRange` for the text being replaced. At a caret, both ends name the same place, including in an empty paragraph.
 - Enter splits the paragraph and Shift+Enter inserts a line break. Backspace at a paragraph's start joins it to the previous one, and Delete at its end joins the next one.
@@ -95,12 +95,13 @@ Not shown: conditional table formatting and balanced columns. A picture the brow
 
 ## Checks
 
-`moon check --all` runs these four, after building the demo:
+`moon check --all` runs these five, after building the editor package:
 
 | Task | What it runs |
 | --- | --- |
-| `demo:test` | The layout with a fixed measurer, where the editor places a typed change, and how the Word comparison scores lines |
-| `demo:types` | That `web/wire.generated.ts` is what the Rust types generate. After changing a command or an inspection field, run `node web/generate-types.mjs` |
+| `editor:test` | The layout with a fixed measurer, and where the editor places a typed change |
+| `editor:types` | That the package's `wire.generated.ts` is what the Rust types generate |
+| `demo:test` | How the Word comparison scores lines |
 | `demo:fixtures` | Every fixture through the WebAssembly module in Node: open, inspect, edit, export, validate, re-open and lay out |
 | `demo:collab` | The collaboration server and its replicas in Node, with an upload and a restart |
 

@@ -1,0 +1,12 @@
+packages:
+  - 'apps/demo/web'
+  - 'packages/*'
+
+# A guard against a compromised release: only versions published at least 3
+# days ago.
+minimumReleaseAge: 4320
+
+allowBuilds:
+  # The platform package (@esbuild/<platform>) already holds the binary;
+  # the postinstall only checks it.
+  esbuild: false
