@@ -38,6 +38,6 @@ Asserted, not verified here:
 
 ## Next
 
-Every part of the prototype's code has moved. The operator plans to pull the editor out of the demo as a library, in a later pull request.
+Every part of the prototype's code has moved. The editor was pulled out of the demo as a package in pipeline 00005.
 
-While the prototype keeps changing, the copies here fall behind it. Bringing them up to date is one copy of the crates, the fixtures, `web/` and `scripts/` at a newer revision, with new hashes in 00001 D4, 00002 D4, 00003 D2 and D3 here.
+While the prototype keeps changing, the copies here fall behind it. Bringing them up to date is one copy of the crates, the fixtures and `scripts/` at a newer revision, with new hashes in 00001 D4, 00002 D4, 00003 D2 and D3 here. `web/` follows the steps in 00005 D2.

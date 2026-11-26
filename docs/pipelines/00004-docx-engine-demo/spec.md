@@ -133,9 +133,10 @@ What would overturn this: a pinned browser that the check can find on any machin
 
 ## Deferred
 
+The editor became the package `@mempipe/docxify-editor` in [00005](../00005-editor-package/spec.md). That pipeline overturns D3, D5 and D6 here.
+
 Each of these waits for the condition named.
 
-- **The editor as a library.** The operator plans to pull it out of the demo as `@mempipe/docxify-editor`, in a later pull request. That ends the byte-for-byte copy for the files it moves.
 - **Rules for storing a shared session.** The demo's server keeps uploads and edits in memory. The prototype's rules for what is stored wait for a part that stores a session.
 - **The rest of the prototype's README.** Its measurements, its list of limitations and its account of the engine need rewriting for this repository. It waits for the operator to ask for it.
 - **Continuous integration.** Nothing runs the checks on a pull request. It waits for the operator to ask for it.
