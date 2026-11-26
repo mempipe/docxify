@@ -34,6 +34,6 @@ Asserted, not verified here:
 
 ## Next
 
-The browser editor moves next, in its own pull request. It brings `web/` and the prototype's scripts, with Node.js and pnpm.
+The browser editor moved in pipeline 00004, with the prototype's scripts.
 
-While the prototype keeps changing, the crates here fall behind it. Bringing them up to date is one copy of every crate and the fixtures at a newer revision, with new hashes in 00001 D4, 00002 D4 and D2 here.
+While the prototype keeps changing, the crates here fall behind it. Bringing them up to date is one copy of every crate and the fixtures at a newer revision, with new hashes in 00001 D4, 00002 D4, D2 here and 00004 D3.
