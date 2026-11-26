@@ -30,6 +30,18 @@ cargo run --release -p docx-engine-yrs --example collab -- fixtures/generated/si
 
 The rules for merging are in the [replica's spec](docs/pipelines/00002-docx-engine-replica/spec.md). The crate does no networking. The caller carries each replica's updates to the others.
 
+### WebAssembly
+
+`crates/docx-engine-wasm` exposes the engine and the replica to JavaScript through [wasm-bindgen](https://github.com/wasm-bindgen/wasm-bindgen). `DocxDocument` opens and reads a DOCX. `DocxReplica` edits one, alone or with others. Commands and inspections cross as JSON, and text offsets count Unicode scalar values, not UTF-16 units.
+
+Build the module:
+
+```bash
+cargo build -p docx-engine-wasm --target wasm32-unknown-unknown --profile wasm
+```
+
+It is written to `target/wasm32-unknown-unknown/wasm/docx_engine_wasm.wasm`. To use it from JavaScript, generate the glue with `wasm-bindgen-cli` at the version in `Cargo.lock`. The details are in the [bindings' spec](docs/pipelines/00003-docx-engine-wasm/spec.md).
+
 ## Development
 
 docxify is a monorepo. [proto](https://moonrepo.dev/proto) installs the tools, and [moon](https://moonrepo.dev/moon) runs the tasks.
@@ -40,7 +52,7 @@ docxify is a monorepo. [proto](https://moonrepo.dev/proto) installs the tools, a
 proto use
 ```
 
-Check everything. This checks formatting, lints and tests every crate:
+Check everything. This checks formatting, lints and tests every crate, and checks that each builds for WebAssembly:
 
 ```bash
 moon check --all
@@ -51,6 +63,8 @@ Run one task in one project:
 ```bash
 moon run docx-engine:test
 ```
+
+The first run downloads the WebAssembly target that `rust-toolchain.toml` names. If a task fails while rustup downloads it, run the check again.
 
 The `format` task only checks. To fix formatting, run `cargo fmt`.
 
