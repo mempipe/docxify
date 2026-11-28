@@ -45,13 +45,14 @@ Overturns: 00004 D3
 | `build.mjs`, `package.json` | Rewritten for this repository (D5) |
 | `pnpm-lock.yaml`, `pnpm-workspace.yaml` | Moved to the root and changed (D4) |
 
-To check the 19 files, list their hashes:
+To check the 19 files, list their hashes beside those of the prototype's `web` tree. That tree is the one 00004 D3 records, and this repository holds it:
 
 ```bash
-git ls-tree HEAD packages/editor/src/
+git ls-tree 76c36b7f0ee062888fe8f204fa5612336607b2ec
+git ls-tree HEAD:packages/editor/src
 ```
 
-The prototype's `web` tree gives the same hash for each name.
+Each of the 19 names has the same hash in both lists.
 
 Keeping those files unchanged leaves three things that read oddly here:
 
@@ -59,12 +60,19 @@ Keeping those files unchanged leaves three things that read oddly here:
 - The modules sit flat in `src/`, as they did in `web/`, so their imports of each other and of `./pkg/` need no edit.
 - The font stylesheets are loaded from a fixed address under the page (D5).
 
+The edits to the four programs are kept to what they import, so a sync can apply them again. Their comments are the prototype's, and some usage lines are out of date:
+
+- `collab-check.ts` and `collab-server.ts` say to run `node web/build.mjs` first. That build now needs the package built, so it fails on a clean tree. The READMEs give `moon run demo:build`, which builds both.
+- `browser-demo.ts` names the editor's modules as files beside it, such as `surface.ts`.
+
 **A later sync from the prototype is no longer one copy.** The crates, the fixtures and `scripts/` still are. For `web/`:
 
 1. Each of the 19 files replaces its copy in `packages/editor/src`.
 2. The four edited programs and `index.html` take the prototype's new text, with the same edits applied again.
-3. A file that is new in the prototype's `web/` is placed by hand: in the package if the editor needs it, in the demo otherwise.
+3. A file that is new in the prototype's `web/` is placed by hand: in the package if the editor needs it, in the demo otherwise. A new test also joins the `test` script of the manifest that runs it, because each `test` script names its files.
 4. A changed dependency in the prototype's `package.json` is carried into the manifest that uses it.
+5. `build.mjs` and the `scripts` of both manifests are this repository's. A change to the prototype's build or to its scripts is carried over by hand.
+6. A replaced file that fails the type check (D3) stops the sync. The operator chooses between fixing the file in the prototype first, editing it here as an exception to this decision, and loosening the compiler's options.
 
 ### D3 — Each module is an entry point, compiled with its types
 
@@ -104,7 +112,11 @@ Proposed: awaiting operator approval.
 - **The Node programs ask the package for the WebAssembly file** with `import.meta.resolve`, in place of a path into `web/pkg/`.
 - **The page still serves the fonts.** The `fonts` module loads stylesheets from `./node_modules/@fontsource/` under the page's address. The demo depends on the five font packages, so pnpm links them at that place, and the demo's server follows the links.
 
-The bundled script is 497 KiB raw and 110 KiB with gzip. It is not minified, so an error in the browser names real functions.
+The page's script is two files: `browser-demo.js`, and a chunk it shares with the editor entry. Together they are 953 KiB raw and 220 KiB with gzip.
+
+- **They are not minified,** so an error in the browser names real functions.
+- **Minified, they would be 429 KiB raw and 136 KiB with gzip.** That was measured with the same build and `minify: true`.
+- **The prototype minified its bundle of Yjs and the Hocuspocus provider.** That code is now in `browser-demo.js`, unminified.
 
 ### D6 — The package builds first, and the demo's tasks follow
 
@@ -126,9 +138,24 @@ Overturns: 00004 D6
 | `demo:browser` | `node scripts/check-browser.mjs` | no |
 
 - **`editor:install` installs the whole pnpm workspace,** the demo's packages too. There is one lockfile, so there is one install.
-- **The demo's tasks depend on `editor:build`.** Their inputs include the package's sources, so a change to the editor reruns the demo's checks.
+- **The demo's tasks that use the package depend on `editor:build`.** `editor:build` declares its outputs, so moon reruns them when the package changes. Their own inputs do not list the package's files. A change to `packages/editor/src` was seen to rerun `demo:fixtures` this way.
 - **`demo:test` now runs only the test of how the Word comparison scores lines.** The editor's two tests moved to `editor:test`. The same 52 tests run in all.
 - **`demo:browser` stays out of `moon check`,** for the reason 00004 D6 gives.
+
+### D7 — The demo keeps its layout and its two links
+
+Proposed: awaiting operator approval.
+
+00004 D4 names packaging the editor as what would decide the demo's layout again. This pipeline is that packaging, and the layout stands. `apps/demo` still holds `web/` and `scripts/`, with the links `fixtures` and `target` beside them.
+
+The moved-out editor needs neither link. The demo's own files still read through them:
+
+- `node-demo.ts` writes to `target/web-demo`.
+- `scripts/compare-with-word.mjs` writes to `target/word-compare`.
+- `scripts/check-with-python-docx.sh` runs `./target/debug/examples/edit`.
+- The demo's server serves `fixtures/`.
+
+One example in 00004 D4 no longer holds. The demo's build does not read the module from `../target`. The package's build reads it from `target/` at the root.
 
 ## Deferred
 

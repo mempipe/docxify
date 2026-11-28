@@ -133,7 +133,7 @@ What would overturn this: a pinned browser that the check can find on any machin
 
 ## Deferred
 
-The editor became the package `@mempipe/docxify-editor` in [00005](../00005-editor-package/spec.md). That pipeline overturns D3, D5 and D6 here.
+The editor became the package `@mempipe/docxify-editor` in [00005](../00005-editor-package/spec.md). That pipeline overturns D3, D5 and D6 here, and keeps D4 (00005 D7).
 
 Each of these waits for the condition named.
 
