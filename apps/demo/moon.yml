@@ -1,6 +1,9 @@
 # yaml-language-server: $schema=https://moonrepo.dev/schemas/project.json
 $schema: 'https://moonrepo.dev/schemas/project.json'
 
+dependsOn:
+  - 'editor'
+
 # The demo's files are the prototype's, and they expect to be run from this
 # directory, with web/, scripts/, fixtures/ and Cargo's target/ beside each
 # other. The last two are links to the repository's own.
@@ -10,59 +13,30 @@ fileGroups:
     - 'web/**/*'
     - '!web/dist/**/*'
     - '!web/node_modules/**/*'
-    - '!web/pkg/**/*'
-    - '/crates/**/*'
     - '/fixtures/**/*'
-    - '/Cargo.toml'
-    - '/Cargo.lock'
-    - '/rust-toolchain.toml'
+    - '/pnpm-lock.yaml'
 
 tasks:
-  install:
-    command: 'pnpm --dir web install --frozen-lockfile'
-    inputs:
-      - 'web/package.json'
-      - 'web/pnpm-lock.yaml'
-      - 'web/pnpm-workspace.yaml'
-
-  tools:
-    # The build runs wasm-bindgen, which must be the version of the
-    # wasm-bindgen crate in Cargo.lock. Cargo skips this when it is installed.
-    command: 'cargo install --locked wasm-bindgen-cli --version 0.2.130'
-    inputs:
-      - '/Cargo.lock'
-
   build:
     command: 'node web/build.mjs'
     deps:
-      - 'install'
-      - 'tools'
+      - 'editor:build'
     inputs:
       - '@group(sources)'
     outputs:
       - 'web/dist'
-      - 'web/pkg'
 
   test:
     command: 'pnpm --dir web run test'
-    deps:
-      - 'build'
     inputs:
-      - '@group(sources)'
-
-  types:
-    # Fails when web/wire.generated.ts is not what the Rust types generate.
-    command: 'node web/generate-types.mjs --check'
-    deps:
-      - 'install'
-    inputs:
-      - '@group(sources)'
+      - 'scripts/**/*'
+      - 'web/package.json'
 
   fixtures:
     # Every fixture through the WebAssembly module, in Node.
     command: 'node web/node-demo.ts'
     deps:
-      - 'build'
+      - 'editor:build'
     inputs:
       - '@group(sources)'
 
@@ -70,7 +44,7 @@ tasks:
     # Replicas and the collaboration server, in Node.
     command: 'node web/collab-check.ts'
     deps:
-      - 'build'
+      - 'editor:build'
     inputs:
       - '@group(sources)'
 

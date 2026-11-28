@@ -6,12 +6,12 @@
 // shared live with everyone who opens the same address. `fixture=` or
 // `upload=` names the document.
 
-import { alone, connect, guest, type Presence, type ReplicaSession, type User } from "./collab.ts";
-import { builtIn, type EditorEvents, FORMATTING, LISTS, resolutionNotes, TABLE_EDITS } from "./editor.ts";
-import { atomText } from "./model.ts";
-import { loadDocxEngine } from "./engine.ts";
-import { type HeldSelection, Surface, SURFACE_CSS } from "./surface.ts";
-import type { Fill, Inspection, InspectNode, NodeId } from "./types.ts";
+import { alone, connect, guest, type Presence, type ReplicaSession, type User } from "@mempipe/docxify-editor/collab";
+import { builtIn, type EditorEvents, FORMATTING, LISTS, resolutionNotes, TABLE_EDITS } from "@mempipe/docxify-editor/editor";
+import { atomText } from "@mempipe/docxify-editor/model";
+import { loadDocxEngine } from "@mempipe/docxify-editor/engine";
+import { type HeldSelection, Surface, SURFACE_CSS } from "@mempipe/docxify-editor/surface";
+import type { Fill, Inspection, InspectNode, NodeId } from "@mempipe/docxify-editor/types";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const status = (value: unknown) => ($("status").textContent = JSON.stringify(value, null, 2));

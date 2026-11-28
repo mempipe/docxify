@@ -6,7 +6,7 @@ settings:
 
 importers:
 
-  .:
+  apps/demo/web:
     dependencies:
       '@fontsource/arimo':
         specifier: 5.3.0
@@ -23,10 +23,26 @@ importers:
       '@fontsource/tinos':
         specifier: 5.3.0
         version: 5.3.0
-      '@hocuspocus/provider':
+      '@hocuspocus/server':
         specifier: 4.8.0
         version: 4.8.0(y-protocols@1.0.7(yjs@13.6.33))(yjs@13.6.33)
-      '@hocuspocus/server':
+      '@mempipe/docxify-editor':
+        specifier: workspace:*
+        version: link:../../../packages/editor
+      y-protocols:
+        specifier: 1.0.7
+        version: 1.0.7(yjs@13.6.33)
+      yjs:
+        specifier: 13.6.33
+        version: 13.6.33
+    devDependencies:
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+
+  packages/editor:
+    dependencies:
+      '@hocuspocus/provider':
         specifier: 4.8.0
         version: 4.8.0(y-protocols@1.0.7(yjs@13.6.33))(yjs@13.6.33)
       prosemirror-commands:
@@ -51,12 +67,12 @@ importers:
         specifier: 13.6.33
         version: 13.6.33
     devDependencies:
-      esbuild:
-        specifier: 0.28.2
-        version: 0.28.2
       json-schema-to-typescript:
         specifier: 15.0.4
         version: 15.0.4
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
 packages:
 
@@ -363,6 +379,11 @@ packages:
   tslib@2.9.1:
     resolution: {integrity: sha512-a4Ux9VKuIMHsOS7ENbEq6hK2ZGYIT27Rtl0E4eD9KqwxhKiQeMZE/9xb3IdYwWaSOyIBQLExhQgXDTYoiCxnWA==}
 
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
   w3c-keyname@2.2.8:
     resolution: {integrity: sha512-dpojBhNsCNN7T82Tm7k26A6G9ML3NkhDsnw9n/eoxSRlVBB4CEtIQ/KTCLI2Fwf3ataSXRhYFkQi3SlnFwPvPQ==}
 
@@ -622,6 +643,8 @@ snapshots:
       picomatch: 4.0.7
 
   tslib@2.9.1: {}
+
+  typescript@5.9.3: {}
 
   w3c-keyname@2.2.8: {}
 

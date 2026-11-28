@@ -8,19 +8,19 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Blocks } from "./blocks.ts";
-import { loadDocxEngine } from "./engine.ts";
-import { markup } from "./markup.ts";
-import { FixedMeasurer } from "./measure.ts";
-import { Paginator } from "./paginate.ts";
-import type { Inspection, InspectNode, NodeId } from "./types.ts";
+import { Blocks } from "@mempipe/docxify-editor/blocks";
+import { loadDocxEngine } from "@mempipe/docxify-editor/engine";
+import { markup } from "@mempipe/docxify-editor/markup";
+import { FixedMeasurer } from "@mempipe/docxify-editor/measure";
+import { Paginator } from "@mempipe/docxify-editor/paginate";
+import type { Inspection, InspectNode, NodeId } from "@mempipe/docxify-editor/types";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const outDir = process.argv[2] ?? join(root, "target", "web-demo");
 mkdirSync(outDir, { recursive: true });
 
 const started = performance.now();
-const engine = await loadDocxEngine(readFileSync(join(root, "web/pkg/docx_engine_wasm_bg.wasm")));
+const engine = await loadDocxEngine(readFileSync(fileURLToPath(import.meta.resolve("@mempipe/docxify-editor/docx_engine_wasm_bg.wasm"))));
 console.log(`engine loaded in ${(performance.now() - started).toFixed(1)} ms`);
 
 function* walk(node: InspectNode): Generator<InspectNode> {

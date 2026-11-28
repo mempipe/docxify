@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/project.json
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+fileGroups:
+  sources:
+    - 'build.mjs'
+    - 'package.json'
+    - 'tsconfig.json'
+    - 'src/**/*'
+    - '!src/pkg/**/*'
+    - '/crates/**/*'
+    - '/Cargo.toml'
+    - '/Cargo.lock'
+    - '/rust-toolchain.toml'
+    - '/pnpm-lock.yaml'
+
+tasks:
+  install:
+    # One install covers the pnpm workspace, so the demo's packages too.
+    command: 'pnpm install --frozen-lockfile'
+    inputs:
+      - 'package.json'
+      - '/apps/demo/web/package.json'
+      - '/pnpm-lock.yaml'
+      - '/pnpm-workspace.yaml'
+
+  tools:
+    # The build runs wasm-bindgen, which must be the version of the
+    # wasm-bindgen crate in Cargo.lock. Cargo skips this when it is installed.
+    command: 'cargo install --locked wasm-bindgen-cli --version 0.2.130'
+    inputs:
+      - '/Cargo.lock'
+
+  build:
+    # Compiling checks the types too, so a type error fails this task.
+    command: 'node build.mjs'
+    deps:
+      - 'install'
+      - 'tools'
+    inputs:
+      - '@group(sources)'
+    outputs:
+      - 'dist'
+      - 'src/pkg'
+
+  test:
+    command: 'pnpm run test'
+    deps:
+      - 'build'
+    inputs:
+      - '@group(sources)'
+
+  types:
+    # Fails when src/wire.generated.ts is not what the Rust types generate.
+    command: 'pnpm run types'
+    deps:
+      - 'install'
+    inputs:
+      - '@group(sources)'

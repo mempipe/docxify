@@ -17,15 +17,15 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { connect, type Person, SEEDER, ReplicaSession } from "./collab.ts";
+import { connect, type Person, SEEDER, ReplicaSession } from "@mempipe/docxify-editor/collab";
 import { Awareness } from "y-protocols/awareness";
-import { Y } from "./collab-deps.ts";
-import type { Editor } from "./editor.ts";
-import { loadDocxEngine } from "./engine.ts";
-import type { InspectNode, NodeId } from "./types.ts";
+import { Y } from "@mempipe/docxify-editor/collab-deps";
+import type { Editor } from "@mempipe/docxify-editor/editor";
+import { loadDocxEngine } from "@mempipe/docxify-editor/engine";
+import type { InspectNode, NodeId } from "@mempipe/docxify-editor/types";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const engine = await loadDocxEngine(readFileSync(join(root, "web/pkg/docx_engine_wasm_bg.wasm")));
+const engine = await loadDocxEngine(readFileSync(fileURLToPath(import.meta.resolve("@mempipe/docxify-editor/docx_engine_wasm_bg.wasm"))));
 const PORT = 18766;
 const fail = (message: string): never => {
   console.error(`FAIL ${message}`);
