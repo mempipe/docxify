@@ -35,7 +35,7 @@ Some modules run with no page. The demo's Node programs use `engine`, `collab`, 
 
 - **The WebAssembly module.** In a browser, `loadDocxEngine()` fetches `docx_engine_wasm_bg.wasm` from beside the script that holds the engine's code. A bundler must put the file there, or the host passes its URL. In Node, pass the bytes. The package exports the file as `@mempipe/docxify-editor/docx_engine_wasm_bg.wasm`.
 - **The fonts.** `fonts` loads its stylesheets from `./node_modules/@fontsource/<family>/` under the page's address. The page must serve the five Fontsource packages there: `arimo`, `caladea`, `carlito`, `cousine` and `tinos`.
-- **A bundler, or an import map.** The modules import ProseMirror, Yjs and the Hocuspocus provider by package name. Yjs and the provider also import 19 `lib0` modules by subpath, such as `lib0/encoding`, so an import map needs an entry for each. The prototype bundled those two to avoid that.
+- **A bundler, or an import map.** The modules import ProseMirror, Yjs and the Hocuspocus provider by package name. An import map needs an entry for every bare name those packages import in turn, each pointing at its browser build. That includes every `lib0` subpath, such as `lib0/encoding`, and the provider's own dependencies. The prototype bundled Yjs and the provider to avoid listing theirs.
 
 ## Building and checking
 
