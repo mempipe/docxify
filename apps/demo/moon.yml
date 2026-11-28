@@ -13,16 +13,7 @@ fileGroups:
     - 'web/**/*'
     - '!web/dist/**/*'
     - '!web/node_modules/**/*'
-    - '/packages/editor/build.mjs'
-    - '/packages/editor/package.json'
-    - '/packages/editor/tsconfig.json'
-    - '/packages/editor/src/**/*'
-    - '!/packages/editor/src/pkg/**/*'
-    - '/crates/**/*'
     - '/fixtures/**/*'
-    - '/Cargo.toml'
-    - '/Cargo.lock'
-    - '/rust-toolchain.toml'
     - '/pnpm-lock.yaml'
 
 tasks:

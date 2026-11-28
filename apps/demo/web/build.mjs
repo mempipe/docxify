@@ -6,7 +6,7 @@
 // bundled with the editor, and the WebAssembly module beside it, where the
 // engine looks for it.
 
-import { copyFileSync, readFileSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
@@ -40,5 +40,6 @@ const size = (path) => {
   const bytes = readFileSync(path);
   return `${(statSync(path).size / 1024).toFixed(0)} KiB raw, ${(gzipSync(bytes, { level: 9 }).length / 1024).toFixed(0)} KiB gzip`;
 };
-console.log(`docx_engine_wasm_bg.wasm: ${size(join(dist, "docx_engine_wasm_bg.wasm"))}`);
-console.log(`browser-demo.js: ${size(join(dist, "browser-demo.js"))}`);
+for (const name of readdirSync(dist).sort()) {
+  console.log(`${name}: ${size(join(dist, name))}`);
+}
